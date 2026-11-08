@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Estudos · Método 4.2</title>
+  <meta name="theme-color" content="#1f5f8b">
+  <link rel="manifest" href="manifest.json">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topo">
+    <div class="marca">Estudos <span>Método 4.2</span></div>
+    <div class="topo-dir">
+      <span id="sync" class="sync" title="Sincronização"></span>
+      <button id="btnTema" class="icone" title="Tema claro/escuro" aria-label="Alternar tema">◐</button>
+    </div>
+  </header>
+  <nav class="abas" id="abas">
+    <button data-view="hoje" class="ativa">Hoje</button>
+    <button data-view="registrar">Registrar</button>
+    <button data-view="painel">Painel</button>
+    <button data-view="material">Material</button>
+    <button data-view="edital">Edital</button>
+    <button data-view="config">Config</button>
+  </nav>
+  <div id="aviso" class="aviso" hidden></div>
+  <main id="app"><p class="muted">Carregando…</p></main>
+  <div id="toast" class="toast" hidden></div>
+  <script src="app.js"></script>
+</body>
+</html>
