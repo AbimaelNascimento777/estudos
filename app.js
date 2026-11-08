@@ -439,7 +439,7 @@ const VIEWS = {
           <td class="num">${a.G}–${a.H}</td><td class="${clsStatus(a.status)}">${esc(a.status)}</td><td class="num">${a.S}</td><td class="num">${pct(a.W)}</td>
           <td>${a.topicosIds.map((t) => `<span class="chip">${esc(t)}</span>`).join('')}</td>
           <td><input type="checkbox" data-acao="incluir" data-id="${esc(a.id)}" ${a.incl ? 'checked' : ''}></td>
-          <td>${botaoQC(a.qcIds, 'QC')}</td></tr>`).join('')}
+          <td>${botaoQC(a.qcIds, 'QC')}${a.link ? ` <a class="btn peq sec" target="_blank" rel="noopener" href="${esc(a.link)}">abrir</a>` : ''}</td></tr>`).join('')}
       </table></div>`}`;
   },
 
@@ -508,7 +508,10 @@ const VIEWS = {
       </table><p class="small muted">Bancas sem ID ficam fora do filtro. Para descobrir o ID: filtre a banca no QConcursos e copie o número de <code>examining_board_ids[]</code> da barra de endereço.</p></div>
       <h2>Backup</h2>
       <div class="card linha"><button class="btn sec" data-acao="backup">Baixar backup (JSON)</button>
-        ${store.demo ? '<button class="btn sec" data-acao="reset-demo">Restaurar dados de demonstração</button>' : ''}</div>`;
+        ${store.demo ? '<button class="btn sec" data-acao="reset-demo">Restaurar dados de demonstração</button>' : ''}</div>
+      <h2>Importar pacote</h2>
+      <div class="card"><p class="small muted">Arquivo JSON no formato <code>{"Aulas": [...], "Topicos": [...]}</code>. Cada linha é gravada pela chave da aba (cria se não existir, atualiza só as colunas enviadas).</p>
+        <input type="file" id="arqPacote" accept=".json,application/json"></div>`;
   },
 };
 
@@ -594,6 +597,18 @@ function ligarRegistro() {
   });
 }
 
+async function importarPacote(arquivo) {
+  const ABAS = ['Config', 'Disciplinas', 'Aulas', 'Topicos', 'Editais', 'Bancas'];
+  let pac;
+  try { pac = JSON.parse(await arquivo.text()); } catch (e) { toast('Arquivo não é um JSON válido.'); return; }
+  const abas = ABAS.filter((a) => Array.isArray(pac[a]) && pac[a].length);
+  if (!abas.length) { toast('Nenhuma aba reconhecida no pacote.'); return; }
+  const resumo = abas.map((a) => `${a}: ${pac[a].length} linha(s)`).join('\n');
+  if (!confirm(`Importar?\n${resumo}`)) return;
+  for (const a of abas) await store.gravar(a, pac[a]);
+  toast(`Pacote importado (${abas.join(', ')}).`);
+}
+
 // ---------- eventos ----------
 document.addEventListener('click', async (ev) => {
   const nav = ev.target.closest('#abas button');
@@ -617,6 +632,7 @@ document.addEventListener('click', async (ev) => {
 
 document.addEventListener('change', (ev) => {
   const el = ev.target;
+  if (el.id === 'arqPacote' && el.files[0]) { importarPacote(el.files[0]); el.value = ''; return; }
   if (el.id === 'selMat') { filtros.material = el.value; LS.set('filtros', filtros); render(); return; }
   if (el.id === 'selTopDisc') { filtros.topDisc = el.value; LS.set('filtros', filtros); render(); return; }
   if (el.id === 'selTopEd') { filtros.topEdital = el.value; LS.set('filtros', filtros); render(); return; }
