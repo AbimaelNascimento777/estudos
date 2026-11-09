@@ -439,7 +439,7 @@ const VIEWS = {
           <td class="num">${a.G}–${a.H}</td><td class="${clsStatus(a.status)}">${esc(a.status)}</td><td class="num">${a.S}</td><td class="num">${pct(a.W)}</td>
           <td>${a.topicosIds.map((t) => `<span class="chip">${esc(t)}</span>`).join('')}</td>
           <td><input type="checkbox" data-acao="incluir" data-id="${esc(a.id)}" ${a.incl ? 'checked' : ''}></td>
-          <td>${botaoQC(a.qcIds, 'QC')}${a.link ? ` <a class="btn peq sec" target="_blank" rel="noopener" href="${esc(a.link)}">abrir</a>` : ''}</td></tr>`).join('')}
+          <td>${a.incl ? `<button class="btn peq sec" data-acao="ja-estudei" data-id="${esc(a.id)}" title="Marcar como já estudada (conta uma batida)">já estudei</button> ` : ''}${botaoQC(a.qcIds, 'QC')}${a.link ? ` <a class="btn peq sec" target="_blank" rel="noopener" href="${esc(a.link)}">abrir</a>` : ''}</td></tr>`).join('')}
       </table></div>`}`;
   },
 
@@ -520,15 +520,29 @@ function cardDisciplina(d, n) {
   const fila = (M.fila[d.cod] || []).filter((a) => a.incl);
   const prox = fila[0];
   const semana = (M.fila[d.cod] || []).filter((a) => a.nestaSemana).sort((a, b) => a.idx - b.idx);
+  // Registro de hoje desta disciplina: o card mostra o dia como cumprido em vez de pular para a próxima aula.
+  const feitoHoje = (M.diario || []).filter((r) => r.data === cfg.hoje && r.cod === d.cod);
+  const ultHoje = feitoHoje[feitoHoje.length - 1];
+  const aulaHoje = ultHoje ? M.aulaMap[ultHoje.aula_id] : null;
   let acao;
-  if (!fila.length) acao = '⚠ Curso desta disciplina ainda não mapeado (aba Material).';
+  if (ultHoje) {
+    const pags = ultHoje.pi !== null && ultHoje.pf !== null ? ` · págs ${ultHoje.pi}–${ultHoje.pf}` : '';
+    const q = ultHoje.q ? ` · ${ultHoje.ac}/${ultHoje.q} (${pct(ultHoje.ac / ultHoje.q)})` : '';
+    acao = `✔ HOJE CONCLUÍDO: ${aulaHoje ? aulaHoje.aula : ultHoje.aula_id}${pags}${q}`;
+  } else if (!fila.length) acao = '⚠ Curso desta disciplina ainda não mapeado (aba Material).';
   else if (cfg.tipoDia === 'REVISÃO') acao = `► HOJE: ${cfg.qRev} questões das aulas desta semana e revise só o que errar`;
   else acao = `${cfg.tipoDia === 'DESCANSO' ? 'Próximo: ' : '► HOJE: '}${prox.aula} — ${prox.proxima}`;
-  const qcIds = cfg.tipoDia === 'REVISÃO' ? [...new Set(semana.flatMap((a) => a.qcIds))] : prox ? prox.qcIds : [];
+  const qcIds = cfg.tipoDia === 'REVISÃO' ? [...new Set(semana.flatMap((a) => a.qcIds))]
+    : aulaHoje ? aulaHoje.qcIds : prox ? prox.qcIds : [];
+  const botoes = ultHoje
+    ? `${prox ? `<span class="small muted">Próximo estudo: ${esc(prox.aula)} — ${esc(prox.proxima)}</span>
+       <button class="btn peq sec" data-acao="registrar-aula" data-id="${esc(prox.id)}">Registrar outra</button>` : ''}`
+    : prox ? `<button class="btn peq" data-acao="registrar-aula" data-id="${esc(prox.id)}">Registrar esta aula</button>
+       <button class="btn peq sec" data-acao="ja-estudei" data-id="${esc(prox.id)}" title="Já estudei antes: conta como batida concluída e passa para a próxima">Já estudei</button>` : '';
   return `<div class="card">
     <div class="linha entre"><h3>${n}. ${esc(d.nome)}</h3><span class="small muted">${cfg.minDisc} min · meta ${pct(d.meta)} · cobertura ${pct(d.cobertura)}</span></div>
-    <div class="acao ${prox && prox.status === 'Reestudar' ? 'reest' : ''}">${esc(acao)}</div>
-    <div class="linha">${prox ? `<button class="btn peq" data-acao="registrar-aula" data-id="${esc(prox.id)}">Registrar esta aula</button>` : ''}
+    <div class="acao ${ultHoje ? 'feito' : prox && prox.status === 'Reestudar' ? 'reest' : ''}">${esc(acao)}</div>
+    <div class="linha">${botoes}
       ${botaoQC(qcIds, cfg.tipoDia === 'REVISÃO' ? 'Caderno QC da semana' : 'Caderno QC da aula')}</div>
     <div class="duas" style="margin-top:10px">
       <div><div class="small muted">Fila de aulas (teoria)</div><table>${fila.slice(0, 4).map((a) => `<tr><td>${esc(a.aula)}</td><td>${esc(String(a.titulo).slice(0, 70))}</td><td class="small ${clsStatus(a.status)}">${esc(a.status)} · faltam ${a.S} págs</td></tr>`).join('')}</table></div>
@@ -597,6 +611,21 @@ function ligarRegistro() {
   });
 }
 
+// Aula estudada fora do app: grava no Diário uma batida concluída (sem páginas, minutos ou questões).
+function marcarEstudada(id) {
+  const a = M.aulaMap[id];
+  if (!a) return;
+  const sug = addDias(M.cfg.hoje, -7);
+  const r = prompt(`Marcar "${a.aula} — ${a.titulo}" como já estudada.\nData em que estudou (dd/mm/aaaa):`, br(sug));
+  if (r === null) return;
+  const m = r.trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (!m) { toast('Data inválida. Use dd/mm/aaaa.'); return; }
+  const data = `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;
+  store.gravar('Diario', [{ uid: uid(), data, aula_id: id, pag_ini: '', pag_fim: '', minutos: '', questoes: '', acertos: '',
+    terminei: 'S', obs: 'Marcada como já estudada', criado_em: new Date().toISOString() }]);
+  toast(`${a.aula} marcada como estudada.`);
+}
+
 async function importarPacote(arquivo) {
   const ABAS = ['Config', 'Disciplinas', 'Aulas', 'Topicos', 'Editais', 'Bancas'];
   let pac;
@@ -620,6 +649,7 @@ document.addEventListener('click', async (ev) => {
   else if (a === 'cron-zerar') cron.zerar();
   else if (a === 'cron-usar') { const f = $('#fReg'); if (f) f.minutos.value = Math.round(cron.ms() / 60000); }
   else if (a === 'registrar-aula') { preAula = id; view = 'registrar'; LS.set('view', view); render(); }
+  else if (a === 'ja-estudei') marcarEstudada(id);
   else if (a === 'apagar-reg') { if (confirm('Apagar este registro?')) store.apagar('Diario', [id]); }
   else if (a === 'recarregar') { await store.recarregar(); render(); toast('Dados recarregados.'); }
   else if (a === 'desconectar') { if (confirm('Desconectar e voltar ao modo demonstração? Os dados continuam na planilha.')) { store.conexao = { url: '', chave: '' }; LS.set('conexao', store.conexao); LS.set('dados', null); store.dados = null; await store.iniciar(); render(); } }
