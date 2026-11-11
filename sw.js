@@ -1,5 +1,5 @@
 // Guarda as telas do site para abrir sem internet. Os dados (Apps Script) nunca passam pelo cache.
-const CACHE = 'estudos-v1';
+const CACHE = 'estudos-v2';
 const ARQUIVOS = ['./', 'index.html', 'app.js', 'style.css', 'manifest.json', 'icon.svg', 'demo.json'];
 
 self.addEventListener('install', (e) => {
@@ -15,7 +15,8 @@ self.addEventListener('fetch', (e) => {
   const url = new URL(e.request.url);
   if (e.request.method !== 'GET' || url.origin !== location.origin) return;
   // Rede primeiro (pega atualizações); sem rede, usa o cache.
-  e.respondWith(fetch(e.request).then((r) => {
+  // 'no-cache' obriga o navegador a revalidar no servidor (o GitHub Pages manda guardar por 10 min).
+  e.respondWith(fetch(new Request(e.request.url, { cache: 'no-cache' })).then((r) => {
     const copia = r.clone();
     caches.open(CACHE).then((c) => c.put(e.request, copia));
     return r;

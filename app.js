@@ -152,7 +152,10 @@ function calcular(D) {
 
   const aulas = (D.Aulas || []).map((a, i) => {
     const g = num(a.pag_ini) ?? 1, h = num(a.pag_fim) ?? g;
-    return { ...a, idx: i, G: g, H: h, I: h - g + 1, ordem: num(a.ordem) ?? i, incl: String(a.incluir || 'S').toUpperCase() !== 'N', regs: [] };
+    // Videoaula (fonte contém "vídeo"): pag_ini/pag_fim são minutos do vídeo; sessão = 75% do tempo da disciplina.
+    const video = /v[ií]deo/i.test(String(a.fonte || ''));
+    return { ...a, idx: i, G: g, H: h, I: h - g + 1, ordem: num(a.ordem) ?? i, incl: String(a.incluir || 'S').toUpperCase() !== 'N', regs: [],
+      video, un: video ? 'min' : 'págs', sess: video ? Math.max(1, Math.round(cfg.minDisc * 0.75)) : cfg.pagsSessao };
   });
   const aulaMap = Object.fromEntries(aulas.map((a) => [a.id, a]));
 
@@ -201,13 +204,13 @@ function calcular(D) {
     a.rank = !a.incl ? 9e6 : (a.status === 'Reestudar' ? 0 : a.status === 'Em andamento' ? 1 : 2) * 100000 + a.O * 1000 + a.ordem;
     a.feitas = a.P > 1 ? a.I : a.Q > 0 ? Math.min(a.I, a.Q - a.G + 1) : 0;
     const pis = ult.filter((r) => r.pi !== null).map((r) => r.pi), pfs = ult.filter((r) => r.pf !== null).map((r) => r.pf);
-    a.reestPags = a.status === 'Reestudar' && pis.length ? `págs ${Math.min(...pis)} a ${Math.max(...pfs)}` : '';
+    a.reestPags = a.status === 'Reestudar' && pis.length ? `${a.un} ${Math.min(...pis)} a ${Math.max(...pfs)}` : '';
     const sem = regs.filter((r) => r.semana === cfg.semana);
     a.nestaSemana = sem.length > 0;
     a.pagsSemana = sem.length && sem.some((r) => r.pi !== null)
       ? `${Math.min(...sem.filter((r) => r.pi !== null).map((r) => r.pi))}–${Math.max(...sem.filter((r) => r.pf !== null).map((r) => r.pf))}` : '';
     a.proxima = a.status === 'Reestudar' ? `REESTUDAR ${a.reestPags} (acerto ${pct(a.W)})`
-      : `Ler págs ${a.R} a ${Math.min(a.H, a.R + cfg.pagsSessao - 1)}${a.H - a.R + 1 <= cfg.pagsSessao ? ' (fim da aula)' : ''}`;
+      : `${a.video ? 'Assistir min' : 'Ler págs'} ${a.R} a ${Math.min(a.H, a.R + a.sess - 1)}${a.H - a.R + 1 <= a.sess ? ' (fim da aula)' : ''}${a.video ? videosNoTrecho(a.obs, a.R, Math.min(a.H, a.R + a.sess - 1)) : ''}`;
     a.topicosIds = splitIds(a.topicos);
   });
 
@@ -225,6 +228,11 @@ function calcular(D) {
     const vista = (a) => a.O > 0 && a.status !== 'Reestudar' && a.status !== 'Em andamento';
     t.status = !t.aulas.length ? 'Sem aula (lacuna)' : !inc.length ? 'Opcional'
       : inc.every(vista) ? 'Visto' : inc.some((a) => vista(a) || a.Q > 0) ? 'Parcial' : 'Não visto';
+    // Edital pintado (Método 4.2): leituras = menor nº de batidas concluídas entre as aulas do tópico;
+    // estudo reverso = registros no Diário com aula_id "<tópico>-REV" (ids de tópico podem coincidir com ids de aula).
+    t.leituras = inc.length ? Math.min(...inc.map((a) => (vista(a) ? a.O : 0))) : 0;
+    t.reversos = diario.filter((r) => r.aula_id === `${t.id}-REV`).length;
+    t.nivel = t.reversos ? 3 + Math.min(2, t.reversos) : Math.min(3, t.leituras);
   });
   aulas.forEach((a) => { a.qcIds = [...new Set(a.topicosIds.flatMap((tid) => (topMap[tid] ? topMap[tid].qcIds : [])))]; });
 
@@ -241,7 +249,10 @@ function calcular(D) {
     d.acerto = d.questoes ? regs.reduce((s, r) => s + r.ac, 0) / d.questoes : null;
     d.batidaMin = inc.length ? Math.min(...inc.map((a) => a.O)) : null;
     d.noCiclo = d.grupo === 'A' || d.grupo === 'B';
-    d.previsao = d.pagsTeoria && d.noCiclo ? addDias(cfg.hoje, Math.ceil((d.pagsTeoria - d.pagsFeitas) / (2 * cfg.pagsSessao)) * 7) : '';
+    d.manut = d.grupo === 'Manutenção' || d.grupo === 'Concluída';
+    d.ultimo = regs.reduce((m, r) => (r.data > m ? r.data : m), '');
+    d.qcIds = [...new Set(topicos.filter((t) => t.cod === d.cod).flatMap((t) => t.qcIds))];
+    d.previsao = d.pagsTeoria && d.noCiclo ? addDias(cfg.hoje, Math.ceil((d.pagsTeoria - d.pagsFeitas) / (2 * (inc[0] ? inc[0].sess : cfg.pagsSessao))) * 7) : '';
     d.situacao = !d.pagsTeoria ? (d.noCiclo ? '⚠ Mapear curso' : '') : d.noCiclo
       ? (!d.questoes ? 'Sem questões ainda' : d.acerto < d.meta ? '⚠ Abaixo da meta' : d.cobertura >= 1 ? '► Concluída: trocar' : '✔ Ok')
       : (d.questoes ? 'Fora do ciclo' : '');
@@ -287,6 +298,16 @@ function botaoQC(ids, rotulo = 'Caderno QC') {
     : `<span class="btn peq off" title="Tópicos desta aula ainda sem IDs do QConcursos (aba Edital)">${esc(rotulo)}</span>`;
 }
 
+// Legenda do edital pintado (cores das planilhas do Método 4.2)
+const NIVEIS = [
+  { rot: 'Não lido', cor: '', tx: '' },
+  { rot: '1ª leitura', cor: '#FFFF00', tx: '#000' }, { rot: '2ª leitura', cor: '#FFC000', tx: '#000' },
+  { rot: '3ª leitura', cor: '#FF0000', tx: '#fff' },
+  { rot: '1º estudo reverso', cor: '#00B050', tx: '#fff' }, { rot: '2º estudo reverso', cor: '#0070C0', tx: '#fff' },
+];
+const chipNivel = (n) => (n ? `<span class="chip" style="background:${NIVEIS[n].cor};color:${NIVEIS[n].tx};border-color:${NIVEIS[n].cor}">${NIVEIS[n].rot}</span>`
+  : '<span class="chip">Não lido</span>');
+
 const clsStatus = (s) => (s === 'Reestudar' || s.startsWith('⚠') || s === 'Sem aula (lacuna)' ? 'st-bad'
   : s.startsWith('Concluída') || s === 'Visto' || s.startsWith('✔') ? 'st-ok' : s === 'Em andamento' || s === 'Parcial' ? 'st-warn' : 'muted');
 
@@ -325,6 +346,7 @@ const VIEWS = {
       <div class="card" style="margin-top:12px"><b>Fazer:</b> ${esc(fazer)}</div>
       ${reest.length ? `<div class="card"><h3 class="st-bad">Reestudo pendente (${reest.length})</h3>${reest.map((a) => `<div>${esc(a.cod)} · ${esc(a.aula)} — ${esc(a.reestPags)} (acerto ${pct(a.W)})</div>`).join('')}</div>` : ''}
       ${discs.map((d, i) => cardDisciplina(d, i + 1)).join('') || '<div class="card">Nenhuma disciplina neste grupo. Ajuste os grupos em Config.</div>'}
+      ${cardExtra()}
       <div class="card"><h3>Pulso da semana</h3>
         <div class="grid">
           <div><div class="l muted small">Horas</div><b>${fmt1(sem.horas)} h de ${fmt1(cfg.metaHorasSemana)} h</b></div>
@@ -370,6 +392,18 @@ const VIEWS = {
           </form>
         </div>
       </div>
+      <div class="card" id="cardExtra">
+        <h3>Conteúdo extra / questões avulsas</h3>
+        <p class="small muted">Questões ou leitura fora da aula do dia (revisão de manutenção, GranQuestões, TEC, QC). Entra nas horas e no % de acerto da disciplina, sem mexer na fila de aulas.</p>
+        <form id="fExtra"><div class="campos">
+          <label>Data<input type="date" name="data" value="${M.cfg.hoje}" required></label>
+          <label>Disciplina<select name="cod" required>${M.discs.map((d) => `<option value="${esc(d.cod)}" ${d.cod === preExtra ? 'selected' : ''}>${esc(d.nome)}</option>`).join('')}</select></label>
+          <label>Minutos<input type="number" name="minutos" min="0"></label>
+          <label>Questões<input type="number" name="questoes" min="0"></label>
+          <label>Acertos<input type="number" name="acertos" min="0"></label>
+          <label style="grid-column:1/-1">Assunto / observações<input name="obs"></label>
+        </div><button class="btn" type="submit">Salvar extra</button></form>
+      </div>
       <h2>Últimos registros</h2>
       <div class="card tab-wrap"><table>
         <tr><th>Data</th><th>Sem.</th><th>Tipo</th><th>Aula</th><th class="num">Págs</th><th class="num">Min</th><th class="num">Q</th><th class="num">%</th><th>Obs.</th><th></th></tr>
@@ -401,6 +435,7 @@ const VIEWS = {
         <div class="kpi"><div class="l">% acerto geral</div><div class="v">${pct(q ? ac / q : null)}</div></div>
         <div class="kpi"><div class="l">Aulas p/ reestudar</div><div class="v">${reest}</div></div>
       </div>
+      <div class="linha" style="margin-top:10px"><button class="btn sec" data-acao="exportar">Exportar meta da semana + edital pintado (Excel)</button></div>
       <h2>${cfg.semana === 1 ? 'Cobrança — semana 1 (parcial; a cobrança real começa na semana 2)' : `Cobrança da semana ${ref}`}</h2>
       <div class="card tab-wrap"><table>
         ${linha('Horas', `${fmt1(s.horas)} h de ${fmt1(cfg.metaHorasSemana)} h`, s.horas >= 0.9 * cfg.metaHorasSemana, 'Dentro da meta', 'Abaixo da meta — recupere no próximo ciclo')}
@@ -464,15 +499,21 @@ const VIEWS = {
         <select id="selTopEd" style="max-width:220px"><option value="">Todos os editais</option>${M.editais.map((e) => `<option value="${esc(e.id)}" ${e.id === fe ? 'selected' : ''}>${esc(e.nome)}</option>`).join('')}</select>
       </div>
       <p class="small muted">Editais: códigos separados por espaço (${esc(idsEd)}). IDs QC: números de assunto do QConcursos separados por espaço.</p>
+      <div class="linha entre" style="margin-bottom:8px">
+        <div class="linha">${NIVEIS.slice(1).map((n, i) => `${chipNivel(i + 1)}`).join('')}
+          <span class="small muted">${tops.length ? NIVEIS.map((n, i) => `${n.rot}: ${tops.filter((t) => t.nivel === i).length}`).join(' · ') : ''}</span></div>
+        <button class="btn peq sec" data-acao="exportar">Exportar meta + edital (Excel)</button></div>
       <div class="card tab-wrap"><table>
-        <tr><th>ID</th><th>Tópico</th><th>Inc.</th><th class="num">% cobr.</th><th>Aulas</th><th>Status</th><th>Editais</th><th>IDs QC</th><th></th></tr>
+        <tr><th>ID</th><th>Tópico</th><th>Inc.</th><th class="num">% cobr.</th><th>Aulas</th><th>Status</th><th>Nível</th><th>Editais</th><th>IDs QC</th><th></th></tr>
         ${tops.map((t) => `<tr><td>${esc(t.id)}</td><td>${esc(t.topico)}<div class="small muted">${esc(t.bloco)}</div></td><td>${esc(t.incidencia)}</td>
           <td class="num">${num(t.pct) !== null ? pct(num(t.pct), 1) : ''}</td>
           <td>${t.aulas.map((a) => `<span class="chip" title="${esc(a.titulo)}">${esc(a.aula)}</span>`).join('') || `<span class="small muted">${esc(t.onde_estudar)}</span>`}</td>
           <td class="${clsStatus(t.status)}">${esc(t.status)}</td>
+          <td style="white-space:nowrap">${chipNivel(t.nivel)}
+            <button class="btn peq sec" data-acao="reverso" data-id="${esc(t.id)}" title="Registrar estudo reverso (questões primeiro) deste tópico">+ reverso</button></td>
           <td><input class="ids" data-acao="top-editais" data-id="${esc(t.id)}" value="${esc(t.editais)}" style="min-width:140px"></td>
           <td><input class="ids" data-acao="top-qc" data-id="${esc(t.id)}" value="${esc(t.qc_subject_ids)}" style="min-width:110px"></td>
-          <td>${botaoQC(t.qcIds, 'QC')}</td></tr>`).join('') || '<tr><td colspan="9" class="muted">Nenhum tópico neste filtro.</td></tr>'}
+          <td>${botaoQC(t.qcIds, 'QC')}</td></tr>`).join('') || '<tr><td colspan="10" class="muted">Nenhum tópico neste filtro.</td></tr>'}
       </table></div>`;
   },
 
@@ -491,11 +532,11 @@ const VIEWS = {
       <div class="card tab-wrap"><table>${(D.Config || []).map((r) => `<tr><td>${esc(r.descricao || r.chave)}</td>
         <td style="width:200px"><input data-acao="cfg" data-id="${esc(r.chave)}" value="${esc(r.chave === 'data_inicio' || r.chave === 'hoje_manual' ? String(r.valor || '').slice(0, 10) : r.valor)}" ${r.chave === 'data_inicio' || r.chave === 'hoje_manual' ? 'type="date"' : ''}></td></tr>`).join('')}</table></div>
       <h2>Disciplinas, grupos e metas</h2>
-      <p class="small muted">Grupo: A, B, Fila, Pausada ou Concluída. A e B alternam nos dias do ciclo.</p>
+      <p class="small muted">Grupo: A, B, Fila, Manutenção, Pausada ou Concluída. A e B alternam nos dias do ciclo. Manutenção e Concluída entram no rodízio de "Conteúdo extra / revisão" (a menos recente primeiro).</p>
       <div class="card tab-wrap"><table>
         <tr><th>Cód.</th><th>Disciplina</th><th>Grupo</th><th>Ordem</th><th>Meta</th><th>Batidas antes</th><th>Onde cai</th></tr>
         ${M.discs.map((d) => `<tr><td>${esc(d.cod)}</td><td>${esc(d.nome)}</td>
-          <td><select data-acao="disc" data-campo="grupo" data-id="${esc(d.cod)}">${['A', 'B', 'Fila', 'Pausada', 'Concluída'].map((g) => `<option ${g === d.grupo ? 'selected' : ''}>${g}</option>`).join('')}</select></td>
+          <td><select data-acao="disc" data-campo="grupo" data-id="${esc(d.cod)}">${['A', 'B', 'Fila', 'Manutenção', 'Pausada', 'Concluída'].map((g) => `<option ${g === d.grupo ? 'selected' : ''}>${g}</option>`).join('')}</select></td>
           <td><input type="number" style="width:70px" data-acao="disc" data-campo="ordem" data-id="${esc(d.cod)}" value="${d.ordem}"></td>
           <td><input type="number" step="0.05" style="width:80px" data-acao="disc" data-campo="meta" data-id="${esc(d.cod)}" value="${d.meta}"></td>
           <td><input type="number" style="width:70px" data-acao="disc" data-campo="batidas_previas" data-id="${esc(d.cod)}" value="${d.batidas_previas}"></td>
@@ -515,18 +556,43 @@ const VIEWS = {
   },
 };
 
+// Espaço "Conteúdo extra / questões" do dia: sugere a disciplina de manutenção estudada há mais tempo.
+function cardExtra() {
+  const { cfg } = M;
+  if (cfg.tipoDia === 'DESCANSO') return '';
+  const manut = M.discs.filter((d) => d.manut).sort((a, b) => (a.ultimo < b.ultimo ? -1 : a.ultimo > b.ultimo ? 1 : a.ordem - b.ordem));
+  const hoje = M.diario.filter((r) => r.data === cfg.hoje && /-EXTRA$/.test(r.aula_id));
+  const sug = manut[0];
+  const q = cfg.tipoDia === 'REVISÃO' ? cfg.qRev : cfg.qFix;
+  const txt = sug ? `${sug.nome} — ${q} questões${sug.ultimo ? ` (última vez: ${br(sug.ultimo)})` : ' (ainda sem registro)'}`
+    : 'Nenhuma disciplina em Manutenção. Marque em Config as que já estudou para entrarem neste rodízio.';
+  return `<div class="card"><div class="linha entre"><h3>${cfg.tipoDia === 'REVISÃO' ? 'Revisão de manutenção' : 'Conteúdo extra / questões'} <span class="small muted">(opcional)</span></h3>
+      <span class="small muted">${manut.length} em manutenção</span></div>
+    ${hoje.length ? hoje.map((r) => `<div class="acao feito">✔ Extra hoje: ${esc((M.discMap[r.cod] || {}).nome || r.cod)} · ${r.q ? `${r.ac}/${r.q} (${pct(r.ac / r.q)})` : ''} ${r.min ? `· ${r.min} min` : ''}</div>`).join('') : ''}
+    <div class="acao">${sug ? '► ' : ''}${esc(txt)}</div>
+    <div class="linha"><button class="btn peq" data-acao="registrar-extra" data-id="${esc(sug ? sug.cod : '')}">Registrar extra</button>
+      ${sug ? botaoQC(sug.qcIds, 'Caderno QC da disciplina') : ''}</div></div>`;
+}
+
+// Bloco de vídeos: obs traz "V23 Título (0–44) | V24 ..."; devolve os vídeos que caem no trecho de minutos.
+function videosNoTrecho(obs, ini, fim) {
+  const vs = [...String(obs || '').matchAll(/V(\d+) ([^|]*?) \((\d+)–(\d+)\)/g)]
+    .filter((m) => +m[4] >= ini && +m[3] < fim).map((m) => `V${m[1]} ${m[2]}`);
+  return vs.length ? ` · ${vs.join(', ')}` : '';
+}
+
 function cardDisciplina(d, n) {
   const { cfg } = M;
   const fila = (M.fila[d.cod] || []).filter((a) => a.incl);
   const prox = fila[0];
   const semana = (M.fila[d.cod] || []).filter((a) => a.nestaSemana).sort((a, b) => a.idx - b.idx);
   // Registro de hoje desta disciplina: o card mostra o dia como cumprido em vez de pular para a próxima aula.
-  const feitoHoje = (M.diario || []).filter((r) => r.data === cfg.hoje && r.cod === d.cod);
+  const feitoHoje = (M.diario || []).filter((r) => r.data === cfg.hoje && r.cod === d.cod && M.aulaMap[r.aula_id]);
   const ultHoje = feitoHoje[feitoHoje.length - 1];
   const aulaHoje = ultHoje ? M.aulaMap[ultHoje.aula_id] : null;
   let acao;
   if (ultHoje) {
-    const pags = ultHoje.pi !== null && ultHoje.pf !== null ? ` · págs ${ultHoje.pi}–${ultHoje.pf}` : '';
+    const pags = ultHoje.pi !== null && ultHoje.pf !== null ? ` · ${aulaHoje ? aulaHoje.un : 'págs'} ${ultHoje.pi}–${ultHoje.pf}` : '';
     const q = ultHoje.q ? ` · ${ultHoje.ac}/${ultHoje.q} (${pct(ultHoje.ac / ultHoje.q)})` : '';
     acao = `✔ HOJE CONCLUÍDO: ${aulaHoje ? aulaHoje.aula : ultHoje.aula_id}${pags}${q}`;
   } else if (!fila.length) acao = '⚠ Curso desta disciplina ainda não mapeado (aba Material).';
@@ -545,7 +611,7 @@ function cardDisciplina(d, n) {
     <div class="linha">${botoes}
       ${botaoQC(qcIds, cfg.tipoDia === 'REVISÃO' ? 'Caderno QC da semana' : 'Caderno QC da aula')}</div>
     <div class="duas" style="margin-top:10px">
-      <div><div class="small muted">Fila de aulas (teoria)</div><table>${fila.slice(0, 4).map((a) => `<tr><td>${esc(a.aula)}</td><td>${esc(String(a.titulo).slice(0, 70))}</td><td class="small ${clsStatus(a.status)}">${esc(a.status)} · faltam ${a.S} págs</td></tr>`).join('')}</table></div>
+      <div><div class="small muted">Fila de aulas (teoria)</div><table>${fila.slice(0, 4).map((a) => `<tr><td>${esc(a.aula)}</td><td>${esc(String(a.titulo).slice(0, 70))}</td><td class="small ${clsStatus(a.status)}">${esc(a.status)} · faltam ${a.S} ${a.un}</td></tr>`).join('')}</table></div>
       <div><div class="small muted">Aulas desta semana (revisão)</div><table>${semana.map((a) => `<tr><td>${esc(a.aula)}</td><td>${esc(String(a.titulo).slice(0, 60))}</td><td class="num">${esc(a.pagsSemana)}</td><td class="num">${pct(a.W)}</td></tr>`).join('') || '<tr><td class="muted small">Nada ainda nesta semana.</td></tr>'}</table></div>
     </div></div>`;
 }
@@ -580,8 +646,22 @@ const cron = {
 setInterval(() => cron.pintar(), 1000);
 
 let preAula = null;
+let preExtra = null;
 function ligarRegistro() {
   cron.pintar();
+  const fx = $('#fExtra');
+  if (fx) {
+    if (preExtra !== null) { $('#cardExtra').scrollIntoView({ block: 'start' }); preExtra = null; }
+    fx.addEventListener('submit', (ev) => {
+      ev.preventDefault();
+      const v = Object.fromEntries(new FormData(fx).entries());
+      const q = num(v.questoes), ac = num(v.acertos);
+      if (q !== null && ac !== null && ac > q) { toast('Acertos maior que questões.'); return; }
+      store.gravar('Diario', [{ uid: uid(), data: v.data, aula_id: `${v.cod}-EXTRA`, pag_ini: '', pag_fim: '', minutos: num(v.minutos) ?? '',
+        questoes: q ?? '', acertos: ac ?? '', terminei: '', obs: `Extra${v.obs ? ': ' + v.obs : ''}`, criado_em: new Date().toISOString() }]);
+      toast('Extra registrado.');
+    });
+  }
   const f = $('#fReg'); if (!f) return;
   const sel = f.aula_id;
   const sugerida = preAula || (() => {
@@ -594,9 +674,11 @@ function ligarRegistro() {
   const info = () => {
     const a = M.aulaMap[sel.value];
     if (!a) return;
-    $('#regInfo').textContent = `${a.status} · teoria págs ${a.G}–${a.H} · próxima pág. ${a.R} · sugestão: ${a.proxima}`;
+    $('#regInfo').textContent = a.video
+      ? `${a.status} · videoaula: nos campos de página use os MINUTOS do vídeo (${a.G}–${a.H}) · próximo min ${a.R} · sugestão: ${a.proxima}`
+      : `${a.status} · teoria págs ${a.G}–${a.H} · próxima pág. ${a.R} · sugestão: ${a.proxima}`;
     f.pag_ini.value = a.R;
-    f.pag_fim.value = Math.min(a.H, a.R + M.cfg.pagsSessao - 1);
+    f.pag_fim.value = Math.min(a.H, a.R + a.sess - 1);
   };
   sel.addEventListener('change', info); info();
   f.addEventListener('submit', (ev) => {
@@ -626,8 +708,78 @@ function marcarEstudada(id) {
   toast(`${a.aula} marcada como estudada.`);
 }
 
+// Estudo reverso: questões primeiro sobre um tópico do edital (gravado no Diário com aula_id = "<tópico>-REV").
+function registrarReverso(tid) {
+  const t = M.topMap[tid];
+  if (!t) return;
+  const r = prompt(`Estudo reverso — ${t.id} ${t.topico}\nInforme: questões acertos minutos (ex.: 30 24 60)`, `${M.cfg.qRev} `);
+  if (r === null) return;
+  const [q, ac, min] = r.trim().split(/[\s,;]+/).map((x) => num(x));
+  if (q === null || q === undefined || ac === null || ac === undefined || ac > q) { toast('Informe questões e acertos (acertos ≤ questões).'); return; }
+  store.gravar('Diario', [{ uid: uid(), data: M.cfg.hoje, aula_id: `${t.id}-REV`, pag_ini: '', pag_fim: '', minutos: min ?? '', questoes: q, acertos: ac,
+    terminei: 'S', obs: `Estudo reverso (${t.reversos + 1}º)`, criado_em: new Date().toISOString() }]);
+  toast(`${t.reversos + 1}º estudo reverso registrado.`);
+}
+
+// Exporta a meta da semana e o edital pintado no formato das planilhas do Método 4.2 (abre no Excel).
+function exportarMeta() {
+  const { cfg } = M;
+  const s = cfg.semana;
+  const ini = addDias(cfg.inicio, (s - 1) * 7);
+  const td = (v, st = '') => `<td style="border:1px solid #999;${st}">${esc(v ?? '')}</td>`;
+  const th = (v) => `<th style="border:1px solid #999;background:#1f5f8b;color:#fff">${esc(v)}</th>`;
+  let linhas = '';
+  for (let k = 0; k < 7; k++) {
+    const data = addDias(ini, k), dia = k + 1;
+    const tipo = dia <= cfg.dT ? 'TEORIA' : dia <= cfg.dT + cfg.dR ? 'REVISÃO' : 'DESCANSO';
+    const g = dia === 7 || dia % 2 === 1 ? 'A' : 'B';
+    const ord = tipo === 'TEORIA' ? g : tipo === 'REVISÃO' ? 'R' + g.toLowerCase() : 'Descanso';
+    const regs = M.diario.filter((r) => r.data === data);
+    const plan = tipo === 'DESCANSO' ? [] : M.discs.filter((d) => d.grupo === g && d.seq).slice(0, cfg.maxDisc);
+    const usados = new Set();
+    const linha = (rot, disc, r) => {
+      if (r) usados.add(r);
+      const a = r && M.aulaMap[r.aula_id];
+      const assunto = !r ? (tipo === 'REVISÃO' ? `Fazer ${cfg.qRev} questões e revisar o que errar` : '')
+        : a ? `${a.titulo}${r.obs ? ' — ' + r.obs : ''}` : /-REV$/.test(r.aula_id) && M.topMap[r.aula_id.slice(0, -4)]
+          ? `${M.topMap[r.aula_id.slice(0, -4)].topico} — ${r.obs}` : r.obs;
+      return `<tr>${td(br(data))}${td(ord)}${td(rot)}${td(disc)}${td(cfg.minDisc)}${td(a ? a.aula : '')}${td(assunto)}
+        ${td(r && r.paginas ? r.paginas : '')}${td(r && r.min ? r.min : '')}${td(r && r.q ? r.q : '')}${td(r && r.q ? r.ac : '')}${td(r && r.q ? pct(r.ac / r.q) : '')}</tr>`;
+    };
+    if (tipo === 'DESCANSO' && !regs.length) { linhas += `<tr>${td(br(data))}${td(ord)}${td('')}${td('Descanso')}${td('')}${td('')}${td('')}${td('')}${td('')}${td('')}${td('')}${td('')}</tr>`; continue; }
+    plan.forEach((d) => {
+      const rs = regs.filter((r) => r.cod === d.cod && M.aulaMap[r.aula_id]);
+      if (!rs.length) linhas += linha(`${d.nome} + ${tipo === 'REVISÃO' ? cfg.qRev : cfg.qFix} questões`, d.nome, null);
+      rs.forEach((r) => { linhas += linha(`${d.nome} + ${tipo === 'REVISÃO' ? cfg.qRev : cfg.qFix} questões`, d.nome, r); });
+    });
+    regs.filter((r) => !usados.has(r)).forEach((r) => {
+      const nome = (M.discMap[r.cod] || {}).nome || r.cod;
+      const rot = /-EXTRA$/.test(r.aula_id) ? 'Conteúdo extra/questões' : /-REV$/.test(r.aula_id) ? 'Estudo reverso' : 'Fora do ciclo do dia';
+      linhas += linha(rot, nome, r);
+    });
+  }
+  const tops = M.topicos.filter((t) => (M.discMap[t.cod] || {}).grupo !== 'Pausada');
+  const ed = tops.map((t) => `<tr>${td((M.discMap[t.cod] || {}).nome || t.cod)}${td(t.id)}${td(t.topico)}
+    ${td(NIVEIS[t.nivel].rot, t.nivel ? `background:${NIVEIS[t.nivel].cor};color:${NIVEIS[t.nivel].tx}` : '')}${td(t.leituras)}${td(t.reversos)}${td(t.editaisIds.join(' '))}</tr>`).join('');
+  const legenda = NIVEIS.slice(1).map((n) => td(n.rot, `background:${n.cor};color:${n.tx};font-weight:bold`)).join('');
+  const html = `<html><head><meta charset="utf-8"></head><body>
+    <h2>CICLO DE ESTUDOS - META ${String(s).padStart(2, '0')}</h2>
+    <p>Semana ${s}: ${br(ini)} a ${br(addDias(ini, 6))} · ${fmt1(cfg.horasDia)} h/dia · blocos de ${cfg.minDisc} min</p>
+    <table><tr>${['Data', 'Ord', 'Disciplina (meta)', 'Disciplina', 'CH (min)', 'Aula / vídeo', 'Assunto visto', 'Páginas', 'Minutos', 'Qtde questões', 'Qtde acertos', '% acerto'].map(th).join('')}</tr>${linhas}</table>
+    <br><h2>CONTEÚDO PROGRAMÁTICO (edital pintado)</h2>
+    <table><tr>${legenda}</tr></table><br>
+    <table><tr>${['Disciplina', 'ID', 'Tópico', 'Nível', 'Leituras', 'Estudos reversos', 'Editais'].map(th).join('')}</tr>${ed}</table>
+    </body></html>`;
+  const blob = new Blob(['﻿' + html], { type: 'application/vnd.ms-excel' });
+  const link = document.createElement('a');
+  link.href = URL.createObjectURL(blob);
+  link.download = `Meta ${String(s).padStart(2, '0')} - semana de ${br(ini).replace(/\//g, '-')}.xls`;
+  link.click();
+  toast('Meta exportada.');
+}
+
 async function importarPacote(arquivo) {
-  const ABAS = ['Config', 'Disciplinas', 'Aulas', 'Topicos', 'Editais', 'Bancas'];
+  const ABAS = ['Config', 'Disciplinas', 'Aulas', 'Topicos', 'Editais', 'Bancas', 'Diario'];
   let pac;
   try { pac = JSON.parse(await arquivo.text()); } catch (e) { toast('Arquivo não é um JSON válido.'); return; }
   const abas = ABAS.filter((a) => Array.isArray(pac[a]) && pac[a].length);
@@ -650,6 +802,9 @@ document.addEventListener('click', async (ev) => {
   else if (a === 'cron-usar') { const f = $('#fReg'); if (f) f.minutos.value = Math.round(cron.ms() / 60000); }
   else if (a === 'registrar-aula') { preAula = id; view = 'registrar'; LS.set('view', view); render(); }
   else if (a === 'ja-estudei') marcarEstudada(id);
+  else if (a === 'registrar-extra') { preExtra = id || ''; view = 'registrar'; LS.set('view', view); render(); }
+  else if (a === 'reverso') registrarReverso(id);
+  else if (a === 'exportar') exportarMeta();
   else if (a === 'apagar-reg') { if (confirm('Apagar este registro?')) store.apagar('Diario', [id]); }
   else if (a === 'recarregar') { await store.recarregar(); render(); toast('Dados recarregados.'); }
   else if (a === 'desconectar') { if (confirm('Desconectar e voltar ao modo demonstração? Os dados continuam na planilha.')) { store.conexao = { url: '', chave: '' }; LS.set('conexao', store.conexao); LS.set('dados', null); store.dados = null; await store.iniciar(); render(); } }
