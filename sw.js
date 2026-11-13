@@ -1,5 +1,5 @@
 // Guarda as telas do site para abrir sem internet. Os dados (Apps Script) nunca passam pelo cache.
-const CACHE = 'estudos-v2';
+const CACHE = 'estudos-v5';
 const ARQUIVOS = ['./', 'index.html', 'app.js', 'style.css', 'manifest.json', 'icon.svg', 'demo.json'];
 
 self.addEventListener('install', (e) => {

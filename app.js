@@ -138,11 +138,28 @@ function calcular(D) {
   cfg.sessoesDia = cfg.horasDia * 60 / cfg.minDisc;
   cfg.metaHorasSemana = cfg.horasDia * cfg.diasSemana;
   cfg.pagsSessao = Math.max(1, Math.round(cfg.minDisc * 0.75 / 60 * cfg.vel));
+  // Ciclo por progresso, não por calendário: o dia do ciclo só avança quando há estudo registrado nele
+  // (o descanso avança sozinho). Dia sem estudo = o mesmo dia do ciclo volta no dia seguinte.
+  const contaEstudo = (r) => !/-HIST$/.test(String(r.aula_id)) && !String(r.uid || '').startsWith('visto-') && r.obs !== 'Marcada como já estudada';
+  const estudouEm = new Set((D.Diario || []).filter(contaEstudo).map((r) => String(r.data).slice(0, 10)));
+  const slot = {}, semIni = [null, cfg.inicio];
+  if (cfg.inicio <= cfg.hoje) {
+    let pos = 1, sem = 1;
+    for (let d = cfg.inicio; ; d = addDias(d, 1)) {
+      slot[d] = { dia: pos, semana: sem, avancou: false };
+      if (d >= cfg.hoje) break;
+      if (pos === 7 || estudouEm.has(d)) { slot[d].avancou = true; pos++; if (pos > 7) { pos = 1; sem++; semIni[sem] = addDias(d, 1); } }
+    }
+  }
+  const tipoDe = (dia) => (dia <= cfg.dT ? 'TEORIA' : dia <= cfg.dT + cfg.dR ? 'REVISÃO' : 'DESCANSO');
+  const grupoDe = (dia) => (dia === 7 || dia % 2 === 1 ? 'A' : 'B');
   const diff = dias(cfg.inicio, cfg.hoje);
-  cfg.semana = Math.max(1, Math.floor(diff / 7) + 1);
-  cfg.dia = (((diff % 7) + 7) % 7) + 1;
-  cfg.tipoDia = cfg.dia <= cfg.dT ? 'TEORIA' : cfg.dia <= cfg.dT + cfg.dR ? 'REVISÃO' : 'DESCANSO';
-  cfg.grupo = cfg.dia === 7 || cfg.dia % 2 === 1 ? 'A' : 'B';
+  const sh = slot[cfg.hoje];
+  cfg.semana = sh ? sh.semana : Math.max(1, Math.floor(diff / 7) + 1);
+  cfg.dia = sh ? sh.dia : (((diff % 7) + 7) % 7) + 1;
+  cfg.tipoDia = tipoDe(cfg.dia);
+  cfg.grupo = grupoDe(cfg.dia);
+  cfg.slot = slot; cfg.semIni = semIni; cfg.tipoDe = tipoDe; cfg.grupoDe = grupoDe;
 
   const discs = [...(D.Disciplinas || [])].map((d) => ({ ...d, meta: num(d.meta) ?? 0.7, ordem: num(d.ordem) ?? 99, batidas_previas: num(d.batidas_previas) ?? 0 }))
     .sort((a, b) => a.ordem - b.ordem);
@@ -167,8 +184,9 @@ function calcular(D) {
   diario.forEach((r) => {
     const a = aulaMap[r.aula_id];
     const dd = dias(cfg.inicio, r.data);
-    r.semana = Math.floor(dd / 7) + 1;
-    r.diaCiclo = (((dd % 7) + 7) % 7) + 1;
+    const sl = slot[r.data];
+    r.semana = sl ? sl.semana : Math.floor(dd / 7) + 1;
+    r.diaCiclo = sl ? sl.dia : (((dd % 7) + 7) % 7) + 1;
     r.tipo = r.diaCiclo <= cfg.dT ? 'Teoria' : r.diaCiclo <= cfg.dT + cfg.dR ? 'Revisão' : 'Extra';
     r.cod = a ? a.cod : String(r.aula_id).split('-')[0];
     r.pi = num(r.pag_ini); r.pf = num(r.pag_fim);
@@ -264,7 +282,7 @@ function calcular(D) {
     const rs = diario.filter((r) => r.semana === s);
     const q = rs.reduce((x, r) => x + r.q, 0);
     semanas.push({
-      s, inicio: addDias(cfg.inicio, (s - 1) * 7), horas: rs.reduce((x, r) => x + r.min, 0) / 60,
+      s, inicio: semIni[s] || addDias(cfg.inicio, (s - 1) * 7), horas: rs.reduce((x, r) => x + r.min, 0) / 60,
       pags: rs.reduce((x, r) => x + r.paginas, 0), q, ac: rs.reduce((x, r) => x + r.ac, 0),
       dias: rs.filter((r) => r.primeiro).length,
     });
@@ -345,6 +363,7 @@ const VIEWS = {
       </div>
       <div class="card" style="margin-top:12px"><b>Fazer:</b> ${esc(fazer)}</div>
       ${reest.length ? `<div class="card"><h3 class="st-bad">Reestudo pendente (${reest.length})</h3>${reest.map((a) => `<div>${esc(a.cod)} · ${esc(a.aula)} — ${esc(a.reestPags)} (acerto ${pct(a.W)})</div>`).join('')}</div>` : ''}
+      ${pendentes().map((p) => cardDisciplina(p.d, 0, p)).join('')}
       ${discs.map((d, i) => cardDisciplina(d, i + 1)).join('') || '<div class="card">Nenhuma disciplina neste grupo. Ajuste os grupos em Config.</div>'}
       ${cardExtra()}
       <div class="card"><h3>Pulso da semana</h3>
@@ -365,13 +384,14 @@ const VIEWS = {
       <div class="duas">
         <div class="card">
           <h3>Cronômetro</h3>
-          <div class="cron" id="cron">00:00:00</div>
+          <div class="linha entre"><div class="cron" id="cron">00:00:00</div><div id="cronPausa" class="small"></div></div>
+          <div id="cronInfo"></div>
           <div class="linha" style="margin-top:8px">
             <button class="btn" data-acao="cron-iniciar" id="btnCron">Iniciar</button>
             <button class="btn sec" data-acao="cron-zerar">Zerar</button>
             <button class="btn sec" data-acao="cron-usar">Usar no registro</button>
           </div>
-          <p class="muted small">O tempo continua contando mesmo se você fechar a página.</p>
+          <p class="muted small">Conta só o tempo líquido; "Pausar" mede as pausas (aviso ao fim do bloco e se a pausa passar de ${PAUSA_MAX_MIN} min). Continua contando mesmo se você fechar a página. "Usar no registro" leva os minutos e o resumo das pausas.</p>
         </div>
         <div class="card">
           <h3>Registrar sessão</h3>
@@ -434,7 +454,16 @@ const VIEWS = {
         <div class="kpi"><div class="l">Questões</div><div class="v">${q}</div></div>
         <div class="kpi"><div class="l">% acerto geral</div><div class="v">${pct(q ? ac / q : null)}</div></div>
         <div class="kpi"><div class="l">Aulas p/ reestudar</div><div class="v">${reest}</div></div>
+        ${resumoPausas(D)}
       </div>
+      <h2>Desempenho por matéria</h2>
+      <div class="card">${graficoAcertoDisc(M.discs)}</div>
+      <div class="duas">
+        <div class="card"><h3>Acerto por semana</h3>${graficoAcertoSemanas(semanas)}</div>
+        <div class="card"><h3>Constância (últimas 16 semanas)</h3>${graficoConstancia(D, cfg.hoje)}</div>
+      </div>
+      <div class="card"><h3>Edital pintado por matéria</h3>${graficoEdital(M.discs, M.topicos)}</div>
+      <div class="card"><h3>Horas líquidas por matéria</h3>${graficoHorasDisc(M.discs)}</div>
       <div class="linha" style="margin-top:10px"><button class="btn sec" data-acao="exportar">Exportar meta da semana + edital pintado (Excel)</button></div>
       <h2>${cfg.semana === 1 ? 'Cobrança — semana 1 (parcial; a cobrança real começa na semana 2)' : `Cobrança da semana ${ref}`}</h2>
       <div class="card tab-wrap"><table>
@@ -581,8 +610,43 @@ function videosNoTrecho(obs, ini, fim) {
   return vs.length ? ` · ${vs.join(', ')}` : '';
 }
 
-function cardDisciplina(d, n) {
+// Disciplinas de dias anteriores do ciclo que ficaram sem registro (últimos 7 dias): continuam no Hoje até serem estudadas.
+function pendentes() {
+  const { cfg } = M, out = [], lim = addDias(cfg.hoje, -7);
+  const hojeCods = new Set(M.discs.filter((x) => x.grupo === cfg.grupo && x.seq).slice(0, cfg.maxDisc).map((x) => x.cod));
+  Object.keys(cfg.slot).sort().forEach((data) => {
+    const s = cfg.slot[data];
+    if (data >= cfg.hoje || data < lim || !s.avancou) return;
+    const tipo = cfg.tipoDe(s.dia);
+    if (tipo === 'DESCANSO') return;
+    M.discs.filter((x) => x.grupo === cfg.grupoDe(s.dia) && x.seq).slice(0, cfg.maxDisc).forEach((x) => {
+      const feito = M.diario.some((r) => r.cod === x.cod && r.data >= data && r.data < cfg.hoje && (M.aulaMap[r.aula_id] || /-REV$/.test(r.aula_id)));
+      if (!feito && !hojeCods.has(x.cod) && !out.some((p) => p.d.cod === x.cod)) out.push({ d: x, data, tipo });
+    });
+  });
+  return out;
+}
+
+// Nome do curso de origem a partir do link do Gran (código do curso na URL).
+const CURSOS_GRAN = {
+  'yzG90gOCk40=': 'SEFAZ-CE', 'qti8/5d3OKw=': 'Receita Federal', 'iDEf+zZRbFE=': 'SEFAZ-AL', 'r42jj7Zmlag=': 'ISS Caruaru',
+  'RCO5GdOmXTE=': 'Gramática Completa (Elias Santana)', 'F9o6cvavlps=': 'SEFAZ-SE', 'SmYLqvcuGm0=': 'SEFAZ-SE', 'PFS+YydpceU=': 'SEFAZ-SE',
+};
+function cursoDaAula(a) {
+  const m = String(a && a.link || '').match(/\/codigo\/([^/]+)\//);
+  if (!m) return '';
+  let c = m[1]; try { c = decodeURIComponent(c); } catch { /* mantém */ }
+  return CURSOS_GRAN[c] ? `Gran · ${CURSOS_GRAN[c]}` : 'Gran';
+}
+function botaoAula(a) {
+  if (!a || !a.link) return '';
+  const curso = cursoDaAula(a);
+  return `<a class="btn peq sec" target="_blank" rel="noopener" href="${esc(a.link)}" title="${esc(`${a.aula} — ${a.titulo}`)}">▶ Abrir aula${curso ? ` (${esc(curso.replace('Gran · ', ''))})` : ''}</a>`;
+}
+
+function cardDisciplina(d, n, pend) {
   const { cfg } = M;
+  const tipoDia = pend ? pend.tipo : cfg.tipoDia;
   const fila = (M.fila[d.cod] || []).filter((a) => a.incl);
   const prox = fila[0];
   const semana = (M.fila[d.cod] || []).filter((a) => a.nestaSemana).sort((a, b) => a.idx - b.idx);
@@ -596,22 +660,25 @@ function cardDisciplina(d, n) {
     const q = ultHoje.q ? ` · ${ultHoje.ac}/${ultHoje.q} (${pct(ultHoje.ac / ultHoje.q)})` : '';
     acao = `✔ HOJE CONCLUÍDO: ${aulaHoje ? aulaHoje.aula : ultHoje.aula_id}${pags}${q}`;
   } else if (!fila.length) acao = '⚠ Curso desta disciplina ainda não mapeado (aba Material).';
-  else if (cfg.tipoDia === 'REVISÃO') acao = `► HOJE: ${cfg.qRev} questões das aulas desta semana e revise só o que errar`;
-  else acao = `${cfg.tipoDia === 'DESCANSO' ? 'Próximo: ' : '► HOJE: '}${prox.aula} — ${prox.proxima}`;
-  const qcIds = cfg.tipoDia === 'REVISÃO' ? [...new Set(semana.flatMap((a) => a.qcIds))]
+  else if (tipoDia === 'REVISÃO') acao = `► ${pend ? 'PENDENTE' : 'HOJE'}: ${cfg.qRev} questões das aulas desta semana e revise só o que errar`;
+  else acao = `${pend ? '► PENDENTE: ' : tipoDia === 'DESCANSO' ? 'Próximo: ' : '► HOJE: '}${prox.aula} — ${prox.proxima}`;
+  const qcIds = tipoDia === 'REVISÃO' ? [...new Set(semana.flatMap((a) => a.qcIds))]
     : aulaHoje ? aulaHoje.qcIds : prox ? prox.qcIds : [];
+  const alvo = aulaHoje || prox;
+  const ref = alvo && tipoDia !== 'REVISÃO' ? `<div class="small muted">📚 ${esc([cursoDaAula(alvo) || alvo.fonte, alvo.aula, alvo.titulo].filter(Boolean).join(' · '))}</div>` : '';
   const botoes = ultHoje
-    ? `${prox ? `<span class="small muted">Próximo estudo: ${esc(prox.aula)} — ${esc(prox.proxima)}</span>
-       <button class="btn peq sec" data-acao="registrar-aula" data-id="${esc(prox.id)}">Registrar outra</button>` : ''}`
-    : prox ? `<button class="btn peq" data-acao="registrar-aula" data-id="${esc(prox.id)}">Registrar esta aula</button>
+    ? `${botaoAula(aulaHoje)}${prox ? `<span class="small muted">Próximo estudo: ${esc(prox.aula)} — ${esc(prox.proxima)}</span>
+       <button class="btn peq sec" data-acao="registrar-aula" data-id="${esc(prox.id)}">Registrar outra</button>${prox !== aulaHoje ? botaoAula(prox) : ''}` : ''}`
+    : prox ? `${tipoDia !== 'REVISÃO' ? botaoAula(prox) : ''}<button class="btn peq" data-acao="registrar-aula" data-id="${esc(prox.id)}">Registrar esta aula</button>
        <button class="btn peq sec" data-acao="ja-estudei" data-id="${esc(prox.id)}" title="Já estudei antes: conta como batida concluída e passa para a próxima">Já estudei</button>` : '';
   return `<div class="card">
-    <div class="linha entre"><h3>${n}. ${esc(d.nome)}</h3><span class="small muted">${cfg.minDisc} min · meta ${pct(d.meta)} · cobertura ${pct(d.cobertura)}</span></div>
+    <div class="linha entre"><h3>${pend ? `⏳ ${esc(d.nome)} <span class="small st-bad">pendente de ${br(pend.data)}</span>` : `${n}. ${esc(d.nome)}`}</h3><span class="small muted">${cfg.minDisc} min · meta ${pct(d.meta)} · cobertura ${pct(d.cobertura)}</span></div>
     <div class="acao ${ultHoje ? 'feito' : prox && prox.status === 'Reestudar' ? 'reest' : ''}">${esc(acao)}</div>
+    ${ref}
     <div class="linha">${botoes}
-      ${botaoQC(qcIds, cfg.tipoDia === 'REVISÃO' ? 'Caderno QC da semana' : 'Caderno QC da aula')}</div>
+      ${botaoQC(qcIds, tipoDia === 'REVISÃO' ? 'Caderno QC da semana' : 'Caderno QC da aula')}</div>
     <div class="duas" style="margin-top:10px">
-      <div><div class="small muted">Fila de aulas (teoria)</div><table>${fila.slice(0, 4).map((a) => `<tr><td>${esc(a.aula)}</td><td>${esc(String(a.titulo).slice(0, 70))}</td><td class="small ${clsStatus(a.status)}">${esc(a.status)} · faltam ${a.S} ${a.un}</td></tr>`).join('')}</table></div>
+      <div><div class="small muted">Fila de aulas (teoria)</div><table>${fila.slice(0, 4).map((a) => `<tr><td>${a.link ? `<a target="_blank" rel="noopener" href="${esc(a.link)}">${esc(a.aula)}</a>` : esc(a.aula)}</td><td>${esc(String(a.titulo).slice(0, 70))}${cursoDaAula(a) ? ` <span class="small muted">(${esc(cursoDaAula(a).replace('Gran · ', ''))})</span>` : ''}</td><td class="small ${clsStatus(a.status)}">${esc(a.status)} · faltam ${a.S} ${a.un}</td></tr>`).join('')}</table></div>
       <div><div class="small muted">Aulas desta semana (revisão)</div><table>${semana.map((a) => `<tr><td>${esc(a.aula)}</td><td>${esc(String(a.titulo).slice(0, 60))}</td><td class="num">${esc(a.pagsSemana)}</td><td class="num">${pct(a.W)}</td></tr>`).join('') || '<tr><td class="muted small">Nada ainda nesta semana.</td></tr>'}</table></div>
     </div></div>`;
 }
@@ -629,18 +696,146 @@ function graficoSemanas(semanas, meta) {
     <line x1="${pad}" x2="${W - pad}" y1="${y(meta)}" y2="${y(meta)}" stroke="var(--warn)" stroke-dasharray="4 3"/></svg>`;
 }
 
+// ---------- gráficos de evolução (SVG inline, sem bibliotecas) ----------
+const W_G = 640;
+const escTxt = (s, n) => esc(String(s).length > n ? String(s).slice(0, n - 1) + '…' : s);
+
+// Barras horizontais: linhas [{rot, v (0–1 ou valor), max, cor, dir, tip, marca}]
+function barrasH(linhas, { lab = 190, alt = 22, fmt = (v) => v, max } = {}) {
+  if (!linhas.length) return '<p class="small muted">Sem dados ainda.</p>';
+  const H = linhas.length * alt + 8, x0 = lab, w = W_G - lab - 90;
+  const mx = max ?? Math.max(...linhas.map((l) => l.v), 1e-9);
+  const els = linhas.map((l, i) => {
+    const y = 4 + i * alt, bw = Math.max(1, (l.v / mx) * w);
+    const marca = l.marca !== undefined ? `<line x1="${x0 + (l.marca / mx) * w}" x2="${x0 + (l.marca / mx) * w}" y1="${y + 1}" y2="${y + alt - 5}" stroke="var(--tx)" stroke-width="2"/>` : '';
+    return `<g><title>${esc(l.tip || '')}</title><text x="${x0 - 6}" y="${y + alt / 2 + 3}" text-anchor="end">${escTxt(l.rot, 28)}</text>
+      <rect x="${x0}" y="${y + 3}" width="${w}" height="${alt - 9}" rx="3" fill="var(--chip)"/>
+      <rect x="${x0}" y="${y + 3}" width="${bw}" height="${alt - 9}" rx="3" fill="${l.cor || 'var(--bar)'}"/>${marca}
+      <text x="${x0 + w + 6}" y="${y + alt / 2 + 3}">${esc(l.dir ?? fmt(l.v))}</text></g>`;
+  }).join('');
+  return `<svg viewBox="0 0 ${W_G} ${H}" width="100%" class="g" role="img">${els}</svg>`;
+}
+
+// % de acerto por disciplina x meta (inclui histórico importado do Gran/QC)
+function graficoAcertoDisc(discs) {
+  const l = discs.filter((d) => d.questoes > 0).sort((a, b) => a.acerto - b.acerto).map((d) => ({
+    rot: d.nome, v: d.acerto, marca: d.meta, cor: d.acerto < d.meta ? 'var(--bad)' : 'var(--ok)',
+    dir: `${pct(d.acerto)} · ${d.questoes} q`, tip: `${d.nome}: ${pct(d.acerto)} em ${d.questoes} questões (meta ${pct(d.meta)})`,
+  }));
+  return `<div class="small muted">Vermelho = abaixo da meta (traço preto). Ordenado do pior para o melhor.</div>${barrasH(l, { max: 1 })}`;
+}
+
+// Horas líquidas por disciplina (do Diário)
+function graficoHorasDisc(discs) {
+  const tot = discs.reduce((s, d) => s + d.horas, 0);
+  const l = discs.filter((d) => d.horas > 0).sort((a, b) => b.horas - a.horas)
+    .map((d) => ({ rot: d.nome, v: d.horas, dir: `${fmt1(d.horas)} h · ${pct(d.horas / tot)}`, tip: `${d.nome}: ${fmt1(d.horas)} h` }));
+  return barrasH(l);
+}
+
+// Edital pintado: distribuição dos tópicos por nível, por disciplina
+function graficoEdital(discs, topicos) {
+  const ds = discs.filter((d) => d.grupo !== 'Pausada').map((d) => ({ d, ts: topicos.filter((t) => t.cod === d.cod) })).filter((x) => x.ts.length);
+  if (!ds.length) return '<p class="small muted">Sem tópicos cadastrados.</p>';
+  const lab = 190, alt = 22, w = W_G - lab - 70, H = ds.length * alt + 8;
+  const els = ds.map(({ d, ts }, i) => {
+    const y = 4 + i * alt; let x = lab;
+    const segs = NIVEIS.map((n, k) => {
+      const c = ts.filter((t) => t.nivel === k).length; if (!c) return '';
+      const sw = (c / ts.length) * w, r = `<rect x="${x}" y="${y + 3}" width="${sw}" height="${alt - 9}" fill="${n.cor || 'var(--chip)'}"><title>${esc(`${d.nome} — ${n.rot}: ${c} de ${ts.length}`)}</title></rect>`;
+      x += sw; return r;
+    }).join('');
+    const lidos = ts.filter((t) => t.nivel > 0).length;
+    return `<text x="${lab - 6}" y="${y + alt / 2 + 3}" text-anchor="end">${escTxt(d.nome, 28)}</text>${segs}<text x="${lab + w + 6}" y="${y + alt / 2 + 3}">${pct(lidos / ts.length)}</text>`;
+  }).join('');
+  const leg = NIVEIS.map((n) => `<span class="chip" style="background:${n.cor || 'var(--chip)'};color:${n.tx || 'var(--tx)'}">${esc(n.rot)}</span>`).join(' ');
+  return `<div class="small muted">% à direita = tópicos com ao menos 1 leitura.</div><svg viewBox="0 0 ${W_G} ${H}" width="100%" class="g" role="img">${els}</svg><div>${leg}</div>`;
+}
+
+// % de acerto e questões por semana do ciclo
+function graficoAcertoSemanas(semanas) {
+  const ult = semanas.slice(-12);
+  if (!ult.some((s) => s.q)) return '<p class="small muted">Sem questões registradas nas semanas do ciclo.</p>';
+  const H = 170, pad = 28, bw = (W_G - pad * 2) / ult.length, maxQ = Math.max(...ult.map((s) => s.q), 1);
+  const y = (v) => H - 20 - v * (H - 40);
+  const bars = ult.map((s, i) => `<rect x="${pad + i * bw + bw * 0.25}" y="${y(s.q / maxQ)}" width="${bw * 0.5}" height="${H - 20 - y(s.q / maxQ)}" rx="2" fill="var(--bar2)"><title>Semana ${s.s}: ${s.q} questões</title></rect>
+    <text x="${pad + i * bw + bw / 2}" y="${H - 5}" text-anchor="middle">S${s.s}</text>`).join('');
+  const pts = ult.map((s, i) => (s.q ? [pad + i * bw + bw / 2, y(s.acerto), s] : null)).filter(Boolean);
+  const linha = pts.length > 1 ? `<polyline fill="none" stroke="var(--pri)" stroke-width="2" points="${pts.map((p) => p[0] + ',' + p[1]).join(' ')}"/>` : '';
+  const dots = pts.map((p) => `<circle cx="${p[0]}" cy="${p[1]}" r="4" fill="var(--pri)"><title>Semana ${p[2].s}: ${pct(p[2].acerto)} em ${p[2].q} questões</title></circle><text x="${p[0]}" y="${p[1] - 8}" text-anchor="middle">${pct(p[2].acerto)}</text>`).join('');
+  return `<div class="small muted">Linha = % de acerto · barras = nº de questões · tracejado = 70%</div>
+    <svg viewBox="0 0 ${W_G} ${H}" width="100%" class="g" role="img">${bars}<line x1="${pad}" x2="${W_G - pad}" y1="${y(0.7)}" y2="${y(0.7)}" stroke="var(--warn)" stroke-dasharray="4 3"/>${linha}${dots}</svg>`;
+}
+
+// Constância: minutos estudados por dia nas últimas 16 semanas (mapa de calor)
+function graficoConstancia(diario, hoje) {
+  const porDia = {};
+  diario.filter((r) => !/-HIST$/.test(String(r.aula_id))).forEach((r) => { porDia[r.data] = (porDia[r.data] || 0) + r.min; });
+  const semanasN = 16, cel = 14, gap = 3, x0 = 30, y0 = 16;
+  const fim = hoje, ini = addDias(fim, -(semanasN * 7 - 1));
+  // alinha o início numa segunda-feira
+  const dow = (s) => (new Date(toUTC(s)).getUTCDay() + 6) % 7;
+  const ini2 = addDias(ini, -dow(ini));
+  const tot = dias(ini2, fim) + 1, cols = Math.ceil(tot / 7);
+  let cells = '', estudados = 0;
+  for (let k = 0; k < tot; k++) {
+    const d = addDias(ini2, k), m = porDia[d] || 0, c = Math.floor(k / 7), r = k % 7;
+    if (m) estudados++;
+    const op = !m ? 0 : m < 60 ? 0.3 : m < 120 ? 0.55 : m < 180 ? 0.8 : 1;
+    cells += `<rect x="${x0 + c * (cel + gap)}" y="${y0 + r * (cel + gap)}" width="${cel}" height="${cel}" rx="3" fill="${m ? 'var(--ok)' : 'var(--chip)'}" fill-opacity="${m ? op : 1}"><title>${br(d)}: ${m} min</title></rect>`;
+  }
+  const rot = ['seg', '', 'qua', '', 'sex', '', 'dom'].map((t, r) => (t ? `<text x="0" y="${y0 + r * (cel + gap) + 11}">${t}</text>` : '')).join('');
+  const W = x0 + cols * (cel + gap), H = y0 + 7 * (cel + gap);
+  return `<div class="small muted">${estudados} de ${tot} dias com estudo · mais escuro = mais minutos (até 1 h, 2 h, 3 h, 3 h+)</div>
+    <svg viewBox="0 0 ${W} ${H}" width="100%" style="max-width:${W * 1.6}px" role="img">${rot}${cells}</svg>`;
+}
+
+// Pausas registradas pelo cronômetro (campo obs "Pausas: n (x min)")
+function resumoPausas(diario) {
+  const rs = diario.map((r) => ({ r, m: String(r.obs || '').match(/Pausas: (\d+) \((\d+) min\)/) })).filter((x) => x.m);
+  if (!rs.length) return '';
+  const liq = rs.reduce((s, x) => s + x.r.min, 0), pau = rs.reduce((s, x) => s + +x.m[2], 0), n = rs.reduce((s, x) => s + +x.m[1], 0);
+  return `<div class="kpi"><div class="l">Pausas (${rs.length} sessões cronometradas)</div><div class="v">${fmt1(n / rs.length)} / sessão</div>
+    <div class="small muted">${Math.round(pau / Math.max(1, n))} min por pausa · tempo líquido ${pct(liq / Math.max(1, liq + pau))}</div></div>`;
+}
+
 // ---------- cronômetro ----------
+// Monitor de pausas: tempo líquido (só estudando) x tempo em pausa. Avisa no fim do bloco e quando a pausa passa do limite.
+const PAUSA_MAX_MIN = 10;
+const hms = (ms) => { const s = Math.floor(ms / 1000); return [Math.floor(s / 3600), Math.floor(s / 60) % 60, s % 60].map((x) => String(x).padStart(2, '0')).join(':'); };
 const cron = {
-  st: LS.get('cron', { inicio: null, acumulado: 0 }),
+  st: { inicio: null, acumulado: 0, pausaIni: null, pausas: 0, pausado: 0, avBloco: false, avPausa: false, ...LS.get('cron', {}) },
   ms() { return this.st.acumulado + (this.st.inicio ? Date.now() - this.st.inicio : 0); },
+  pausaAtual() { return this.st.pausaIni ? Date.now() - this.st.pausaIni : 0; },
+  pausaMs() { return this.st.pausado + this.pausaAtual(); },
   salvar() { LS.set('cron', this.st); },
-  alternar() { if (this.st.inicio) { this.st.acumulado = this.ms(); this.st.inicio = null; } else this.st.inicio = Date.now(); this.salvar(); this.pintar(); },
-  zerar() { this.st = { inicio: null, acumulado: 0 }; this.salvar(); this.pintar(); },
+  alternar() {
+    const st = this.st, agora = Date.now();
+    if (st.inicio) { st.acumulado = this.ms(); st.inicio = null; st.pausaIni = agora; st.pausas++; }
+    else { if (st.pausaIni) { st.pausado += agora - st.pausaIni; st.pausaIni = null; } st.inicio = agora; st.avPausa = false; }
+    this.salvar(); this.pintar();
+  },
+  zerar() { this.st = { inicio: null, acumulado: 0, pausaIni: null, pausas: 0, pausado: 0, avBloco: false, avPausa: false }; this.salvar(); this.pintar(); },
+  resumo() { return this.st.pausas ? `Pausas: ${this.st.pausas} (${Math.round(this.pausaMs() / 60000)} min)` : ''; },
   pintar() {
+    const st = this.st, liq = this.ms(), bloco = ((M && M.cfg && M.cfg.minDisc) || 90) * 60000;
+    // Avisos (mesmo fora da tela de registro)
+    if (st.inicio && liq >= bloco && !st.avBloco) { st.avBloco = true; this.salvar(); toast(`Bloco de ${Math.round(bloco / 60000)} min líquidos concluído — faça a pausa (água, banheiro, alongar).`); }
+    if (st.pausaIni && this.pausaAtual() >= PAUSA_MAX_MIN * 60000 && !st.avPausa) { st.avPausa = true; this.salvar(); toast(`A pausa passou de ${PAUSA_MAX_MIN} min — hora de voltar.`); }
     const el = $('#cron'); if (!el) return;
-    const s = Math.floor(this.ms() / 1000);
-    el.textContent = [Math.floor(s / 3600), Math.floor(s / 60) % 60, s % 60].map((x) => String(x).padStart(2, '0')).join(':');
-    const b = $('#btnCron'); if (b) b.textContent = this.st.inicio ? 'Pausar' : this.ms() ? 'Continuar' : 'Iniciar';
+    el.textContent = hms(liq);
+    const b = $('#btnCron'); if (b) b.textContent = st.inicio ? 'Pausar' : liq ? 'Continuar' : 'Iniciar';
+    const p = $('#cronPausa');
+    if (p) {
+      const pa = this.pausaAtual(), longa = pa >= PAUSA_MAX_MIN * 60000;
+      p.innerHTML = st.pausaIni ? `<span class="${longa ? 'st-bad' : 'st-warn'}">⏸ Em pausa há ${hms(pa).slice(3)}${longa ? ' — volte!' : ''}</span>` : st.inicio ? '<span class="st-ok">● Estudando</span>' : '';
+    }
+    const inf = $('#cronInfo');
+    if (inf) {
+      const tot = liq + this.pausaMs(), ef = tot ? liq / tot : null;
+      inf.innerHTML = `<div class="barra" title="Bloco: ${Math.round(liq / 60000)} de ${Math.round(bloco / 60000)} min"><i style="width:${Math.min(100, (liq / bloco) * 100)}%"></i></div>
+        <div class="small muted" style="margin-top:4px">Bloco ${Math.round(liq / 60000)}/${Math.round(bloco / 60000)} min · ${st.pausas} pausa(s) · ${Math.round(this.pausaMs() / 60000)} min pausado · tempo líquido ${pct(ef)}</div>`;
+    }
   },
 };
 setInterval(() => cron.pintar(), 1000);
@@ -725,12 +920,17 @@ function registrarReverso(tid) {
 function exportarMeta() {
   const { cfg } = M;
   const s = cfg.semana;
-  const ini = addDias(cfg.inicio, (s - 1) * 7);
+  const ini = cfg.semIni[s] || addDias(cfg.inicio, (s - 1) * 7);
   const td = (v, st = '') => `<td style="border:1px solid #999;${st}">${esc(v ?? '')}</td>`;
   const th = (v) => `<th style="border:1px solid #999;background:#1f5f8b;color:#fff">${esc(v)}</th>`;
   let linhas = '';
-  for (let k = 0; k < 7; k++) {
-    const data = addDias(ini, k), dia = k + 1;
+  // Datas desta semana do ciclo (por progresso: pode ter mais de 7 dias de calendário); sem mapa, 7 dias corridos.
+  const datas = Object.keys(cfg.slot).filter((d) => cfg.slot[d].semana === s).sort();
+  if (!datas.length) for (let k = 0; k < 7; k++) datas.push(addDias(ini, k));
+  for (const data of datas) {
+    const sl = cfg.slot[data];
+    if (sl && !sl.avancou && data < cfg.hoje && !M.diario.some((r) => r.data === data)) continue; // dia sem estudo: não ocupa o ciclo
+    const dia = sl ? sl.dia : datas.indexOf(data) + 1;
     const tipo = dia <= cfg.dT ? 'TEORIA' : dia <= cfg.dT + cfg.dR ? 'REVISÃO' : 'DESCANSO';
     const g = dia === 7 || dia % 2 === 1 ? 'A' : 'B';
     const ord = tipo === 'TEORIA' ? g : tipo === 'REVISÃO' ? 'R' + g.toLowerCase() : 'Descanso';
@@ -799,7 +999,14 @@ document.addEventListener('click', async (ev) => {
   const a = el.dataset.acao, id = el.dataset.id;
   if (a === 'cron-iniciar') cron.alternar();
   else if (a === 'cron-zerar') cron.zerar();
-  else if (a === 'cron-usar') { const f = $('#fReg'); if (f) f.minutos.value = Math.round(cron.ms() / 60000); }
+  else if (a === 'cron-usar') {
+    const f = $('#fReg');
+    if (f) {
+      f.minutos.value = Math.round(cron.ms() / 60000);
+      const r = cron.resumo();
+      if (r && f.obs && !/Pausas: /.test(f.obs.value)) f.obs.value = [f.obs.value, r].filter(Boolean).join(' | ');
+    }
+  }
   else if (a === 'registrar-aula') { preAula = id; view = 'registrar'; LS.set('view', view); render(); }
   else if (a === 'ja-estudei') marcarEstudada(id);
   else if (a === 'registrar-extra') { preExtra = id || ''; view = 'registrar'; LS.set('view', view); render(); }

@@ -72,3 +72,6 @@ textarea { min-height: 60px; }
   padding: 9px 16px; border-radius: 8px; font-size: 14px; z-index: 20; max-width: 90vw; }
 .ids { font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
 svg text { fill: var(--muted); font-size: 11px; }
+/* Gráficos: no celular mantêm largura mínima legível e rolam para o lado */
+svg.g { min-width: 540px; }
+.card:has(svg.g) { overflow-x: auto; }
