@@ -138,29 +138,6 @@ function calcular(D) {
   cfg.sessoesDia = cfg.horasDia * 60 / cfg.minDisc;
   cfg.metaHorasSemana = cfg.horasDia * cfg.diasSemana;
   cfg.pagsSessao = Math.max(1, Math.round(cfg.minDisc * 0.75 / 60 * cfg.vel));
-  // Ciclo por progresso, não por calendário: o dia do ciclo só avança quando há estudo registrado nele
-  // (o descanso avança sozinho). Dia sem estudo = o mesmo dia do ciclo volta no dia seguinte.
-  const contaEstudo = (r) => !/-HIST$/.test(String(r.aula_id)) && !String(r.uid || '').startsWith('visto-') && r.obs !== 'Marcada como já estudada';
-  const estudouEm = new Set((D.Diario || []).filter(contaEstudo).map((r) => String(r.data).slice(0, 10)));
-  const slot = {}, semIni = [null, cfg.inicio];
-  if (cfg.inicio <= cfg.hoje) {
-    let pos = 1, sem = 1;
-    for (let d = cfg.inicio; ; d = addDias(d, 1)) {
-      slot[d] = { dia: pos, semana: sem, avancou: false };
-      if (d >= cfg.hoje) break;
-      if (pos === 7 || estudouEm.has(d)) { slot[d].avancou = true; pos++; if (pos > 7) { pos = 1; sem++; semIni[sem] = addDias(d, 1); } }
-    }
-  }
-  const tipoDe = (dia) => (dia <= cfg.dT ? 'TEORIA' : dia <= cfg.dT + cfg.dR ? 'REVISÃO' : 'DESCANSO');
-  const grupoDe = (dia) => (dia === 7 || dia % 2 === 1 ? 'A' : 'B');
-  const diff = dias(cfg.inicio, cfg.hoje);
-  const sh = slot[cfg.hoje];
-  cfg.semana = sh ? sh.semana : Math.max(1, Math.floor(diff / 7) + 1);
-  cfg.dia = sh ? sh.dia : (((diff % 7) + 7) % 7) + 1;
-  cfg.tipoDia = tipoDe(cfg.dia);
-  cfg.grupo = grupoDe(cfg.dia);
-  cfg.slot = slot; cfg.semIni = semIni; cfg.tipoDe = tipoDe; cfg.grupoDe = grupoDe;
-
   const discs = [...(D.Disciplinas || [])].map((d) => ({ ...d, meta: num(d.meta) ?? 0.7, ordem: num(d.ordem) ?? 99, batidas_previas: num(d.batidas_previas) ?? 0 }))
     .sort((a, b) => a.ordem - b.ordem);
   const discMap = Object.fromEntries(discs.map((d) => [d.cod, d]));
@@ -175,6 +152,41 @@ function calcular(D) {
       video, un: video ? 'min' : 'págs', sess: video ? Math.max(1, Math.round(cfg.minDisc * 0.75)) : cfg.pagsSessao };
   });
   const aulaMap = Object.fromEntries(aulas.map((a) => [a.id, a]));
+
+  // Ciclo por progresso, não por calendário: o dia do ciclo (com suas disciplinas) fica valendo até TODAS
+  // as disciplinas dele terem registro; só então passa ao próximo. Não há atraso nem acúmulo de pendências.
+  // O descanso (dia 7) passa sozinho no dia seguinte.
+  const tipoDe = (dia) => (dia <= cfg.dT ? 'TEORIA' : dia <= cfg.dT + cfg.dR ? 'REVISÃO' : 'DESCANSO');
+  const grupoDe = (dia) => (dia === 7 || dia % 2 === 1 ? 'A' : 'B');
+  const discsDoDia = (dia) => discs.filter((d) => d.grupo === grupoDe(dia) && d.seq).slice(0, cfg.maxDisc).map((d) => d.cod);
+  const contaEstudo = (r) => !/-HIST$/.test(String(r.aula_id)) && !String(r.uid || '').startsWith('visto-') && r.obs !== 'Marcada como já estudada';
+  const codDe = (r) => (aulaMap[r.aula_id] ? aulaMap[r.aula_id].cod : /-REV$/.test(String(r.aula_id)) ? String(r.aula_id).split('-')[0] : null);
+  const estudos = (D.Diario || []).filter(contaEstudo).map((r) => ({ data: String(r.data).slice(0, 10), cod: codDe(r) })).filter((r) => r.cod);
+  const slot = {}, semIni = [null, cfg.inicio];
+  let slotIni = cfg.inicio;
+  if (cfg.inicio <= cfg.hoje) {
+    let pos = 1, sem = 1;
+    for (let d = cfg.inicio; ; d = addDias(d, 1)) {
+      slot[d] = { dia: pos, semana: sem, avancou: false };
+      if (d >= cfg.hoje) break;
+      const cods = discsDoDia(pos);
+      const completo = pos === 7 || (cods.length
+        ? cods.every((c) => estudos.some((r) => r.cod === c && r.data >= slotIni && r.data <= d))
+        : estudos.some((r) => r.data === d));
+      if (completo) {
+        slot[d].avancou = true; pos++; slotIni = addDias(d, 1);
+        if (pos > 7) { pos = 1; sem++; semIni[sem] = slotIni; }
+      }
+    }
+  }
+  const diff = dias(cfg.inicio, cfg.hoje);
+  const sh = slot[cfg.hoje];
+  cfg.semana = sh ? sh.semana : Math.max(1, Math.floor(diff / 7) + 1);
+  cfg.dia = sh ? sh.dia : (((diff % 7) + 7) % 7) + 1;
+  cfg.tipoDia = tipoDe(cfg.dia);
+  cfg.grupo = grupoDe(cfg.dia);
+  cfg.slotIni = sh ? slotIni : cfg.hoje; // primeiro dia de calendário do dia de ciclo atual
+  cfg.slot = slot; cfg.semIni = semIni; cfg.tipoDe = tipoDe; cfg.grupoDe = grupoDe;
 
   // Diário enriquecido
   const diario = [...(D.Diario || [])].map((r) => ({ ...r, data: String(r.data).slice(0, 10) }))
@@ -358,12 +370,11 @@ const VIEWS = {
     return `
       <div class="grid">
         <div class="kpi"><div class="l">Hoje</div><div class="v">${br(cfg.hoje)}</div></div>
-        <div class="kpi"><div class="l">Semana · dia do ciclo</div><div class="v">${cfg.semana} · ${cfg.dia} de 7</div></div>
+        <div class="kpi"><div class="l">Semana · dia do ciclo</div><div class="v">${cfg.semana} · ${cfg.dia} de 7</div>${cfg.slotIni < cfg.hoje ? `<div class="small muted">em aberto desde ${br(cfg.slotIni)}</div>` : ''}</div>
         <div class="kpi"><div class="l">Tipo · grupo</div><div class="v">${cfg.tipoDia} · ${cfg.grupo}</div></div>
       </div>
       <div class="card" style="margin-top:12px"><b>Fazer:</b> ${esc(fazer)}</div>
       ${reest.length ? `<div class="card"><h3 class="st-bad">Reestudo pendente (${reest.length})</h3>${reest.map((a) => `<div>${esc(a.cod)} · ${esc(a.aula)} — ${esc(a.reestPags)} (acerto ${pct(a.W)})</div>`).join('')}</div>` : ''}
-      ${pendentes().map((p) => cardDisciplina(p.d, 0, p)).join('')}
       ${discs.map((d, i) => cardDisciplina(d, i + 1)).join('') || '<div class="card">Nenhuma disciplina neste grupo. Ajuste os grupos em Config.</div>'}
       ${cardExtra()}
       <div class="card"><h3>Pulso da semana</h3>
@@ -610,23 +621,6 @@ function videosNoTrecho(obs, ini, fim) {
   return vs.length ? ` · ${vs.join(', ')}` : '';
 }
 
-// Disciplinas de dias anteriores do ciclo que ficaram sem registro (últimos 7 dias): continuam no Hoje até serem estudadas.
-function pendentes() {
-  const { cfg } = M, out = [], lim = addDias(cfg.hoje, -7);
-  const hojeCods = new Set(M.discs.filter((x) => x.grupo === cfg.grupo && x.seq).slice(0, cfg.maxDisc).map((x) => x.cod));
-  Object.keys(cfg.slot).sort().forEach((data) => {
-    const s = cfg.slot[data];
-    if (data >= cfg.hoje || data < lim || !s.avancou) return;
-    const tipo = cfg.tipoDe(s.dia);
-    if (tipo === 'DESCANSO') return;
-    M.discs.filter((x) => x.grupo === cfg.grupoDe(s.dia) && x.seq).slice(0, cfg.maxDisc).forEach((x) => {
-      const feito = M.diario.some((r) => r.cod === x.cod && r.data >= data && r.data < cfg.hoje && (M.aulaMap[r.aula_id] || /-REV$/.test(r.aula_id)));
-      if (!feito && !hojeCods.has(x.cod) && !out.some((p) => p.d.cod === x.cod)) out.push({ d: x, data, tipo });
-    });
-  });
-  return out;
-}
-
 // Nome do curso de origem a partir do link do Gran (código do curso na URL).
 const CURSOS_GRAN = {
   'yzG90gOCk40=': 'SEFAZ-CE', 'qti8/5d3OKw=': 'Receita Federal', 'iDEf+zZRbFE=': 'SEFAZ-AL', 'r42jj7Zmlag=': 'ISS Caruaru',
@@ -651,7 +645,8 @@ function cardDisciplina(d, n, pend) {
   const prox = fila[0];
   const semana = (M.fila[d.cod] || []).filter((a) => a.nestaSemana).sort((a, b) => a.idx - b.idx);
   // Registro de hoje desta disciplina: o card mostra o dia como cumprido em vez de pular para a próxima aula.
-  const feitoHoje = (M.diario || []).filter((r) => r.data === cfg.hoje && r.cod === d.cod && M.aulaMap[r.aula_id]);
+  // Vale tudo registrado desde que este dia do ciclo começou (pode ter começado em dias de calendário anteriores).
+  const feitoHoje = (M.diario || []).filter((r) => r.data >= cfg.slotIni && r.data <= cfg.hoje && r.cod === d.cod && (M.aulaMap[r.aula_id] || /-REV$/.test(r.aula_id)));
   const ultHoje = feitoHoje[feitoHoje.length - 1];
   const aulaHoje = ultHoje ? M.aulaMap[ultHoje.aula_id] : null;
   let acao;
