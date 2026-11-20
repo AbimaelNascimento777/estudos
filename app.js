@@ -153,40 +153,53 @@ function calcular(D) {
   });
   const aulaMap = Object.fromEntries(aulas.map((a) => [a.id, a]));
 
-  // Ciclo por progresso, não por calendário: o dia do ciclo (com suas disciplinas) fica valendo até TODAS
-  // as disciplinas dele terem registro; só então passa ao próximo. Não há atraso nem acúmulo de pendências.
-  // O descanso (dia 7) passa sozinho no dia seguinte.
+  // Ciclo por progresso, não por calendário (Método 4.2): A, B, A, B (teoria), A, B (revisão), descanso.
+  // Cada "dia do ciclo" é um bloco: assim que TODAS as disciplinas do bloco têm registro, o ciclo passa
+  // na hora para o próximo bloco — no mesmo dia, se der tempo. Bloco incompleto continua aberto no dia
+  // seguinte, com o que já foi feito marcado. Não há atraso nem reestudo.
+  // Descanso (dia 7): é o dia de calendário seguinte ao fechamento do dia 6; passa sozinho depois dele.
+  // Se você registrar uma disciplina do Grupo A durante o descanso, a nova semana começa ali.
   const tipoDe = (dia) => (dia <= cfg.dT ? 'TEORIA' : dia <= cfg.dT + cfg.dR ? 'REVISÃO' : 'DESCANSO');
   const grupoDe = (dia) => (dia === 7 || dia % 2 === 1 ? 'A' : 'B');
-  const discsDoDia = (dia) => discs.filter((d) => d.grupo === grupoDe(dia) && d.seq).slice(0, cfg.maxDisc).map((d) => d.cod);
+  const discsDoDia = (dia) => (dia === 7 ? [] : discs.filter((d) => d.grupo === grupoDe(dia) && d.seq).slice(0, cfg.maxDisc).map((d) => d.cod));
   const contaEstudo = (r) => !/-HIST$/.test(String(r.aula_id)) && !String(r.uid || '').startsWith('visto-') && r.obs !== 'Marcada como já estudada';
   const codDe = (r) => (aulaMap[r.aula_id] ? aulaMap[r.aula_id].cod : /-REV$/.test(String(r.aula_id)) ? String(r.aula_id).split('-')[0] : null);
-  const estudos = (D.Diario || []).filter(contaEstudo).map((r) => ({ data: String(r.data).slice(0, 10), cod: codDe(r) })).filter((r) => r.cod);
-  const slot = {}, semIni = [null, cfg.inicio];
-  let slotIni = cfg.inicio;
-  if (cfg.inicio <= cfg.hoje) {
-    let pos = 1, sem = 1;
-    for (let d = cfg.inicio; ; d = addDias(d, 1)) {
-      slot[d] = { dia: pos, semana: sem, avancou: false };
-      if (d >= cfg.hoje) break;
-      const cods = discsDoDia(pos);
-      const completo = pos === 7 || (cods.length
-        ? cods.every((c) => estudos.some((r) => r.cod === c && r.data >= slotIni && r.data <= d))
-        : estudos.some((r) => r.data === d));
-      if (completo) {
-        slot[d].avancou = true; pos++; slotIni = addDias(d, 1);
-        if (pos > 7) { pos = 1; sem++; semIni[sem] = slotIni; }
-      }
-    }
-  }
-  const diff = dias(cfg.inicio, cfg.hoje);
-  const sh = slot[cfg.hoje];
-  cfg.semana = sh ? sh.semana : Math.max(1, Math.floor(diff / 7) + 1);
-  cfg.dia = sh ? sh.dia : (((diff % 7) + 7) % 7) + 1;
+  const chaveReg = (r) => String(r.uid || `${String(r.data).slice(0, 10)}|${r.criado_em}|${r.aula_id}`);
+  const ordemReg = (a, b) => (a.data < b.data ? -1 : a.data > b.data ? 1 : String(a.criado_em) < String(b.criado_em) ? -1 : String(a.criado_em) > String(b.criado_em) ? 1 : 0);
+  const regsCiclo = (D.Diario || []).map((r) => ({ r, data: String(r.data).slice(0, 10) }))
+    .filter((x) => x.data >= cfg.inicio && x.data <= cfg.hoje)
+    .map((x) => ({ ...x, criado_em: x.r.criado_em, cod: contaEstudo(x.r) ? codDe(x.r) : null })).sort(ordemReg);
+  const posDe = {}; // chave do registro -> { dia, semana }
+  const semIni = [null, cfg.inicio];
+  const fechados = []; // blocos concluídos: { dia, semana, data }
+  let pos = 1, sem = 1, feitos = new Set(), slotIni = cfg.inicio, descansoEm = null;
+  const avancar = (data) => {
+    fechados.push({ dia: pos, semana: sem, data });
+    pos++; feitos = new Set(); slotIni = data;
+    if (pos === 7) descansoEm = addDias(data, 1);
+  };
+  const novaSemana = (data) => { pos = 1; sem++; feitos = new Set(); semIni[sem] = data; slotIni = data; descansoEm = null; };
+  const passarDescanso = (data) => { if (pos === 7 && data > descansoEm) novaSemana(addDias(descansoEm, 1)); };
+  regsCiclo.forEach((x) => {
+    passarDescanso(x.data);
+    if (pos === 7 && x.cod && discsDoDia(1).includes(x.cod)) novaSemana(x.data);
+    posDe[chaveReg(x.r)] = { dia: pos, semana: sem, conta: !!x.cod };
+    if (pos === 7 || !x.cod) return;
+    const cods = discsDoDia(pos);
+    if (cods.length && !cods.includes(x.cod)) return; // fora do bloco atual: conta nas horas, não fecha o bloco
+    feitos.add(x.cod);
+    if (!cods.length || cods.every((c) => feitos.has(c))) avancar(x.data);
+  });
+  passarDescanso(cfg.hoje);
+  cfg.semana = sem;
+  cfg.dia = pos;
   cfg.tipoDia = tipoDe(cfg.dia);
   cfg.grupo = grupoDe(cfg.dia);
-  cfg.slotIni = sh ? slotIni : cfg.hoje; // primeiro dia de calendário do dia de ciclo atual
-  cfg.slot = slot; cfg.semIni = semIni; cfg.tipoDe = tipoDe; cfg.grupoDe = grupoDe;
+  cfg.slotIni = slotIni; // dia de calendário em que o bloco atual abriu
+  cfg.descansoEm = descansoEm;
+  cfg.fechados = fechados;
+  cfg.fechadosHoje = fechados.filter((f) => f.data === cfg.hoje).map((f) => ({ ...f, tipo: tipoDe(f.dia), grupo: grupoDe(f.dia) }));
+  cfg.posDe = posDe; cfg.chaveReg = chaveReg; cfg.semIni = semIni; cfg.tipoDe = tipoDe; cfg.grupoDe = grupoDe;
 
   // Diário enriquecido
   const diario = [...(D.Diario || [])].map((r) => ({ ...r, data: String(r.data).slice(0, 10) }))
@@ -196,8 +209,8 @@ function calcular(D) {
   diario.forEach((r) => {
     const a = aulaMap[r.aula_id];
     const dd = dias(cfg.inicio, r.data);
-    const sl = slot[r.data];
-    r.semana = sl ? sl.semana : Math.floor(dd / 7) + 1;
+    const sl = posDe[chaveReg(r)];
+    r.semana = sl ? sl.semana : Math.max(1, Math.floor(dd / 7) + 1);
     r.diaCiclo = sl ? sl.dia : (((dd % 7) + 7) % 7) + 1;
     r.tipo = r.diaCiclo <= cfg.dT ? 'Teoria' : r.diaCiclo <= cfg.dT + cfg.dR ? 'Revisão' : 'Extra';
     r.cod = a ? a.cod : String(r.aula_id).split('-')[0];
@@ -229,18 +242,17 @@ function calcular(D) {
     a.V = a.T ? ult.reduce((s, r) => s + r.ac, 0) : 0;
     a.W = a.U ? a.V / a.U : null;
     a.X = d.meta;
-    a.status = !a.incl ? 'Opcional (fora)' : a.W !== null && a.W < a.X ? 'Reestudar'
+    // Sem reestudo: nota baixa não trava a fila nem passa aula na frente — é corrigida nos dias de revisão.
+    a.abaixoMeta = a.W !== null && a.W < a.X;
+    a.status = !a.incl ? 'Opcional (fora)'
       : a.Q > 0 ? 'Em andamento' : a.O > 0 ? `Concluída (${a.O}ª batida)` : 'Não iniciada';
-    a.rank = !a.incl ? 9e6 : (a.status === 'Reestudar' ? 0 : a.status === 'Em andamento' ? 1 : 2) * 100000 + a.O * 1000 + a.ordem;
+    a.rank = !a.incl ? 9e6 : (a.status === 'Em andamento' ? 1 : 2) * 100000 + a.O * 1000 + a.ordem;
     a.feitas = a.P > 1 ? a.I : a.Q > 0 ? Math.min(a.I, a.Q - a.G + 1) : 0;
-    const pis = ult.filter((r) => r.pi !== null).map((r) => r.pi), pfs = ult.filter((r) => r.pf !== null).map((r) => r.pf);
-    a.reestPags = a.status === 'Reestudar' && pis.length ? `${a.un} ${Math.min(...pis)} a ${Math.max(...pfs)}` : '';
     const sem = regs.filter((r) => r.semana === cfg.semana);
     a.nestaSemana = sem.length > 0;
     a.pagsSemana = sem.length && sem.some((r) => r.pi !== null)
       ? `${Math.min(...sem.filter((r) => r.pi !== null).map((r) => r.pi))}–${Math.max(...sem.filter((r) => r.pf !== null).map((r) => r.pf))}` : '';
-    a.proxima = a.status === 'Reestudar' ? `REESTUDAR ${a.reestPags} (acerto ${pct(a.W)})`
-      : `${a.video ? 'Assistir min' : 'Ler págs'} ${a.R} a ${Math.min(a.H, a.R + a.sess - 1)}${a.H - a.R + 1 <= a.sess ? ' (fim da aula)' : ''}${a.video ? videosNoTrecho(a.obs, a.R, Math.min(a.H, a.R + a.sess - 1)) : ''}`;
+    a.proxima = `${a.video ? 'Assistir min' : 'Ler págs'} ${a.R} a ${Math.min(a.H, a.R + a.sess - 1)}${a.H - a.R + 1 <= a.sess ? ' (fim da aula)' : ''}${a.video ? videosNoTrecho(a.obs, a.R, Math.min(a.H, a.R + a.sess - 1)) : ''}`;
     a.topicosIds = splitIds(a.topicos);
   });
 
@@ -255,7 +267,7 @@ function calcular(D) {
   aulas.forEach((a) => a.topicosIds.forEach((tid) => { if (topMap[tid]) topMap[tid].aulas.push(a); }));
   topicos.forEach((t) => {
     const inc = t.aulas.filter((a) => a.incl);
-    const vista = (a) => a.O > 0 && a.status !== 'Reestudar' && a.status !== 'Em andamento';
+    const vista = (a) => a.O > 0 && a.status !== 'Em andamento';
     t.status = !t.aulas.length ? 'Sem aula (lacuna)' : !inc.length ? 'Opcional'
       : inc.every(vista) ? 'Visto' : inc.some((a) => vista(a) || a.Q > 0) ? 'Parcial' : 'Não visto';
     // Edital pintado (Método 4.2): leituras = menor nº de batidas concluídas entre as aulas do tópico;
@@ -272,7 +284,6 @@ function calcular(D) {
     d.pagsTeoria = inc.reduce((s, a) => s + a.I, 0);
     d.pagsFeitas = inc.reduce((s, a) => s + a.feitas, 0);
     d.cobertura = d.pagsTeoria ? d.pagsFeitas / d.pagsTeoria : 0;
-    d.reestudar = (fila[d.cod] || []).filter((a) => a.status === 'Reestudar').length;
     const regs = diario.filter((r) => r.cod === d.cod);
     d.horas = regs.reduce((s, r) => s + r.min, 0) / 60;
     d.questoes = regs.reduce((s, r) => s + r.q, 0);
@@ -361,20 +372,23 @@ function render() {
 const VIEWS = {
   hoje() {
     const { cfg } = M;
+    const descanso = cfg.tipoDia === 'DESCANSO';
     const fazer = cfg.tipoDia === 'TEORIA' ? `~${Math.round(cfg.minDisc * 0.75)} min de leitura + ${cfg.qFix} questões por disciplina`
-      : cfg.tipoDia === 'REVISÃO' ? `${cfg.qRev} questões por disciplina (assuntos da semana) + revisar só o que errou`
-        : 'Descanso. Olhe o Painel. Abaixo: o que vem no Dia 1 (Grupo A).';
+      : cfg.tipoDia === 'REVISÃO' ? `revisar TODAS as disciplinas do Grupo ${cfg.grupo}: ${cfg.qRev} questões por disciplina (assuntos da semana) e corrigir o que errar`
+        : cfg.descansoEm > cfg.hoje ? `Semana ${cfg.semana} fechada. Descanso em ${br(cfg.descansoEm)}. Abaixo: o que vem no Dia 1 (Grupo A) — se estudar uma disciplina do Grupo A antes, a nova semana começa na hora.`
+          : 'Descanso. Olhe o Painel. Abaixo: o que vem no Dia 1 (Grupo A).';
     const discs = M.discs.filter((d) => d.grupo === cfg.grupo && d.seq).slice(0, cfg.maxDisc);
-    const reest = M.aulas.filter((a) => a.status === 'Reestudar');
+    const feitas = descanso ? [] : discs.filter((d) => feitoNoBloco(d.cod).length);
+    const nomeBloco = (f) => `Dia ${f.dia} · ${f.tipo === 'REVISÃO' ? 'Revisão' : 'Teoria'} ${f.grupo}`;
     const sem = M.semanas[M.semanas.length - 1] || { horas: 0, pags: 0, q: 0, acerto: null };
     return `
       <div class="grid">
         <div class="kpi"><div class="l">Hoje</div><div class="v">${br(cfg.hoje)}</div></div>
-        <div class="kpi"><div class="l">Semana · dia do ciclo</div><div class="v">${cfg.semana} · ${cfg.dia} de 7</div>${cfg.slotIni < cfg.hoje ? `<div class="small muted">em aberto desde ${br(cfg.slotIni)}</div>` : ''}</div>
-        <div class="kpi"><div class="l">Tipo · grupo</div><div class="v">${cfg.tipoDia} · ${cfg.grupo}</div></div>
+        <div class="kpi"><div class="l">Semana · dia do ciclo</div><div class="v">${cfg.semana} · ${cfg.dia} de 7</div>${!descanso && cfg.slotIni < cfg.hoje ? `<div class="small muted">bloco aberto desde ${br(cfg.slotIni)}</div>` : ''}</div>
+        <div class="kpi"><div class="l">Tipo · grupo</div><div class="v">${descanso ? 'DESCANSO' : `${cfg.tipoDia} · ${cfg.grupo}`}</div>${!descanso && discs.length ? `<div class="small muted">${feitas.length} de ${discs.length} disciplinas feitas</div>` : ''}</div>
       </div>
-      <div class="card" style="margin-top:12px"><b>Fazer:</b> ${esc(fazer)}</div>
-      ${reest.length ? `<div class="card"><h3 class="st-bad">Reestudo pendente (${reest.length})</h3>${reest.map((a) => `<div>${esc(a.cod)} · ${esc(a.aula)} — ${esc(a.reestPags)} (acerto ${pct(a.W)})</div>`).join('')}</div>` : ''}
+      ${cfg.fechadosHoje.length ? `<div class="card" style="margin-top:12px"><div class="acao feito">✔ Hoje você concluiu: ${cfg.fechadosHoje.map((f) => esc(nomeBloco(f))).join(' · ')}${descanso ? '' : ` — agora segue o Dia ${cfg.dia} (Grupo ${cfg.grupo}). Estude se tiver tempo; se não, ele continua aqui amanhã.`}</div></div>` : ''}
+      <div class="card" style="margin-top:12px"><b>${descanso ? 'Descanso:' : 'Fazer:'}</b> ${esc(fazer)}</div>
       ${discs.map((d, i) => cardDisciplina(d, i + 1)).join('') || '<div class="card">Nenhuma disciplina neste grupo. Ajuste os grupos em Config.</div>'}
       ${cardExtra()}
       <div class="card"><h3>Pulso da semana</h3>
@@ -452,7 +466,6 @@ const VIEWS = {
     const s = semanas.find((x) => x.s === ref) || { horas: 0, dias: 0, pags: 0, q: 0, acerto: null };
     const metaPag = cfg.dT * cfg.pagsSessao * cfg.sessoesDia;
     const metaQ = (cfg.dT * cfg.qFix + cfg.dR * cfg.qRev) * cfg.sessoesDia;
-    const reest = M.aulas.filter((a) => a.status === 'Reestudar').length;
     const fila = M.discs.filter((d) => d.grupo === 'Fila').sort((a, b) => a.ordem - b.ordem)[0];
     const troca = M.discs.some((d) => d.noCiclo && d.cobertura >= 1);
     const q = D.reduce((x, r) => x + r.q, 0), ac = D.reduce((x, r) => x + r.ac, 0);
@@ -464,7 +477,6 @@ const VIEWS = {
         <div class="kpi"><div class="l">Páginas lidas</div><div class="v">${D.reduce((x, r) => x + r.paginas, 0)}</div></div>
         <div class="kpi"><div class="l">Questões</div><div class="v">${q}</div></div>
         <div class="kpi"><div class="l">% acerto geral</div><div class="v">${pct(q ? ac / q : null)}</div></div>
-        <div class="kpi"><div class="l">Aulas p/ reestudar</div><div class="v">${reest}</div></div>
         ${resumoPausas(D)}
       </div>
       <h2>Desempenho por matéria</h2>
@@ -482,22 +494,22 @@ const VIEWS = {
         ${linha('Dias estudados', `${s.dias} de ${cfg.diasSemana}`, s.dias >= cfg.diasSemana, 'Constância ok', 'Faltaram dias — constância vem antes de volume')}
         ${linha('Páginas lidas', `${s.pags} de ~${Math.round(metaPag)}`, s.pags >= 0.8 * metaPag, 'Ritmo de leitura ok', 'Leitura abaixo do previsto — a previsão de término atrasa')}
         ${linha('Questões / acerto', `${s.q} | ${pct(s.acerto)}`, s.q >= 0.8 * metaQ, 'Volume de questões ok', `Poucas questões — meta ≈ ${Math.round(metaQ)}/semana`)}
-        ${linha('Reestudo pendente', `${reest} aula(s)`, reest === 0, 'Nada pendente', 'Refaça antes de avançar (aparece no topo de Hoje)')}
         <tr><td>Rodízio</td><td>${fila ? 'Próxima da fila: ' + esc(fila.nome) : 'Fila vazia'}</td><td>${troca ? '► Disciplina do ciclo com 100% — troque pela próxima (Config)' : 'Ciclo atual em andamento'}</td></tr>
       </table></div>
       <h2>Por disciplina</h2>
       <div class="card tab-wrap"><table>
-        <tr><th>Cód.</th><th>Disciplina</th><th>Grupo</th><th class="num">Págs</th><th>Cobertura</th><th class="num">Reest.</th><th class="num">Horas</th><th class="num">Questões</th><th class="num">% acerto</th><th class="num">Meta</th><th class="num">Batida</th><th>Previsão</th><th>Situação</th></tr>
+        <tr><th>Cód.</th><th>Disciplina</th><th>Grupo</th><th class="num">Págs</th><th>Cobertura</th><th class="num">Horas</th><th class="num">Questões</th><th class="num">% acerto</th><th class="num">Meta</th><th class="num">Batida</th><th>Previsão</th><th>Situação</th></tr>
         ${M.discs.map((d) => `<tr><td>${esc(d.cod)}</td><td>${esc(d.nome)}</td><td>${esc(d.grupo)}</td><td class="num">${d.pagsFeitas}/${d.pagsTeoria}</td>
           <td style="min-width:90px"><div class="barra"><i style="width:${Math.min(100, d.cobertura * 100)}%"></i></div><span class="small">${pct(d.cobertura)}</span></td>
-          <td class="num">${d.reestudar || ''}</td><td class="num">${fmt1(d.horas)}</td><td class="num">${d.questoes}</td><td class="num">${pct(d.acerto)}</td>
+          <td class="num">${fmt1(d.horas)}</td><td class="num">${d.questoes}</td><td class="num">${pct(d.acerto)}</td>
           <td class="num">${pct(d.meta)}</td><td class="num">${d.batidaMin ?? ''}</td><td>${br(d.previsao)}</td><td class="${clsStatus(d.situacao)}">${esc(d.situacao)}</td></tr>`).join('')}
       </table><p class="small muted">Previsão = páginas que faltam ÷ (2 sessões por semana × ${cfg.pagsSessao} págs por sessão). Só para disciplinas do ciclo.</p></div>
       <h2>Evolução semanal</h2>
       <div class="card">${graficoSemanas(semanas, cfg.metaHorasSemana)}
         <div class="tab-wrap"><table><tr><th>Semana</th><th>Início</th><th class="num">Horas</th><th class="num">Aderência</th><th class="num">Páginas</th><th class="num">Questões</th><th class="num">% acerto</th><th class="num">Dias</th></tr>
         ${[...semanas].reverse().map((w) => `<tr><td>${w.s}</td><td>${br(w.inicio)}</td><td class="num">${fmt1(w.horas)}</td><td class="num">${pct(w.horas / cfg.metaHorasSemana)}</td><td class="num">${w.pags}</td><td class="num">${w.q}</td><td class="num">${pct(w.acerto)}</td><td class="num">${w.dias}</td></tr>`).join('')}
-        </table></div></div>`;
+        </table></div></div>
+      ${historicoPorData()}`;
   },
 
   material() {
@@ -638,22 +650,29 @@ function botaoAula(a) {
   return `<a class="btn peq sec" target="_blank" rel="noopener" href="${esc(a.link)}" title="${esc(`${a.aula} — ${a.titulo}`)}">▶ Abrir aula${curso ? ` (${esc(curso.replace('Gran · ', ''))})` : ''}</a>`;
 }
 
+// Registros (aula ou estudo reverso) de uma disciplina dentro do bloco atual do ciclo.
+function feitoNoBloco(cod) {
+  const { cfg } = M;
+  return (M.diario || []).filter((r) => r.semana === cfg.semana && r.diaCiclo === cfg.dia && r.data <= cfg.hoje && r.cod === cod
+    && (cfg.posDe[cfg.chaveReg(r)] || {}).conta);
+}
+
 function cardDisciplina(d, n, pend) {
   const { cfg } = M;
   const tipoDia = pend ? pend.tipo : cfg.tipoDia;
   const fila = (M.fila[d.cod] || []).filter((a) => a.incl);
   const prox = fila[0];
   const semana = (M.fila[d.cod] || []).filter((a) => a.nestaSemana).sort((a, b) => a.idx - b.idx);
-  // Registro de hoje desta disciplina: o card mostra o dia como cumprido em vez de pular para a próxima aula.
-  // Vale tudo registrado desde que este dia do ciclo começou (pode ter começado em dias de calendário anteriores).
-  const feitoHoje = (M.diario || []).filter((r) => r.data >= cfg.slotIni && r.data <= cfg.hoje && r.cod === d.cod && (M.aulaMap[r.aula_id] || /-REV$/.test(r.aula_id)));
+  // Registro desta disciplina no bloco atual do ciclo: o card mostra como cumprida em vez de pular para a próxima aula.
+  // Vale o que foi registrado neste bloco, mesmo que ele tenha aberto em dias de calendário anteriores.
+  const feitoHoje = tipoDia === 'DESCANSO' ? [] : feitoNoBloco(d.cod);
   const ultHoje = feitoHoje[feitoHoje.length - 1];
   const aulaHoje = ultHoje ? M.aulaMap[ultHoje.aula_id] : null;
   let acao;
   if (ultHoje) {
     const pags = ultHoje.pi !== null && ultHoje.pf !== null ? ` · ${aulaHoje ? aulaHoje.un : 'págs'} ${ultHoje.pi}–${ultHoje.pf}` : '';
     const q = ultHoje.q ? ` · ${ultHoje.ac}/${ultHoje.q} (${pct(ultHoje.ac / ultHoje.q)})` : '';
-    acao = `✔ HOJE CONCLUÍDO: ${aulaHoje ? aulaHoje.aula : ultHoje.aula_id}${pags}${q}`;
+    acao = `✔ FEITO NESTE BLOCO${ultHoje.data < cfg.hoje ? ` (${br(ultHoje.data)})` : ''}: ${aulaHoje ? aulaHoje.aula : ultHoje.aula_id}${pags}${q}`;
   } else if (!fila.length) acao = '⚠ Curso desta disciplina ainda não mapeado (aba Material).';
   else if (tipoDia === 'REVISÃO') acao = `► ${pend ? 'PENDENTE' : 'HOJE'}: ${cfg.qRev} questões das aulas desta semana e revise só o que errar`;
   else acao = `${pend ? '► PENDENTE: ' : tipoDia === 'DESCANSO' ? 'Próximo: ' : '► HOJE: '}${prox.aula} — ${prox.proxima}`;
@@ -668,7 +687,7 @@ function cardDisciplina(d, n, pend) {
        <button class="btn peq sec" data-acao="ja-estudei" data-id="${esc(prox.id)}" title="Já estudei antes: conta como batida concluída e passa para a próxima">Já estudei</button>` : '';
   return `<div class="card">
     <div class="linha entre"><h3>${pend ? `⏳ ${esc(d.nome)} <span class="small st-bad">pendente de ${br(pend.data)}</span>` : `${n}. ${esc(d.nome)}`}</h3><span class="small muted">${cfg.minDisc} min · meta ${pct(d.meta)} · cobertura ${pct(d.cobertura)}</span></div>
-    <div class="acao ${ultHoje ? 'feito' : prox && prox.status === 'Reestudar' ? 'reest' : ''}">${esc(acao)}</div>
+    <div class="acao ${ultHoje ? 'feito' : ''}">${esc(acao)}</div>
     ${ref}
     <div class="linha">${botoes}
       ${botaoQC(qcIds, tipoDia === 'REVISÃO' ? 'Caderno QC da semana' : 'Caderno QC da aula')}</div>
@@ -785,6 +804,108 @@ function graficoConstancia(diario, hoje) {
     <svg viewBox="0 0 ${W} ${H}" width="100%" style="max-width:${W * 1.6}px" role="img">${rot}${cells}</svg>`;
 }
 
+// ---------- histórico por data (monitoramento, independente do ciclo) ----------
+// Período escolhido no Painel; padrão: últimos 30 dias. Compara com o período anterior de mesmo tamanho.
+const PERIODOS = { 7: 'Últimos 7 dias', 30: 'Últimos 30 dias', 90: 'Últimos 90 dias', mes: 'Este mês', tudo: 'Tudo' };
+function periodoHist() {
+  const { cfg } = M;
+  const p = filtros.histPer || '30';
+  if (p === 'custom' && filtros.histIni && filtros.histFim) return { ini: filtros.histIni <= filtros.histFim ? filtros.histIni : filtros.histFim, fim: filtros.histIni <= filtros.histFim ? filtros.histFim : filtros.histIni, p };
+  if (p === 'mes') return { ini: cfg.hoje.slice(0, 8) + '01', fim: cfg.hoje, p };
+  if (p === 'tudo') {
+    const datas = M.diario.map((r) => r.data).filter(Boolean).sort();
+    return { ini: datas[0] && datas[0] < cfg.inicio ? datas[0] : cfg.inicio, fim: cfg.hoje, p };
+  }
+  const n = Number(p) || 30;
+  return { ini: addDias(cfg.hoje, -(n - 1)), fim: cfg.hoje, p: String(n) };
+}
+
+// Só sessões reais de estudo (fica de fora histórico importado e aula marcada como "já estudei").
+const ehSessao = (r) => !/-HIST$/.test(String(r.aula_id)) && !String(r.uid || '').startsWith('visto-') && r.obs !== 'Marcada como já estudada';
+
+function resumoPeriodo(ini, fim) {
+  const rs = M.diario.filter((r) => ehSessao(r) && r.data >= ini && r.data <= fim);
+  const q = rs.reduce((s, r) => s + r.q, 0), ac = rs.reduce((s, r) => s + r.ac, 0);
+  const datas = new Set(rs.map((r) => r.data));
+  const min = rs.reduce((s, r) => s + r.min, 0);
+  return {
+    rs, dias: datas.size, total: dias(ini, fim) + 1, horas: min / 60, mediaDia: datas.size ? min / 60 / datas.size : 0,
+    discs: new Set(rs.map((r) => r.cod)).size, sessoes: rs.length, pags: rs.reduce((s, r) => s + r.paginas, 0), q, ac, acerto: q ? ac / q : null,
+    blocos: M.cfg.fechados.filter((f) => f.data >= ini && f.data <= fim).length,
+  };
+}
+
+function historicoPorData() {
+  const { cfg } = M;
+  const { ini, fim, p } = periodoHist();
+  const n = dias(ini, fim) + 1;
+  const A = resumoPeriodo(ini, fim);
+  const B = resumoPeriodo(addDias(ini, -n), addDias(ini, -1));
+  const nome = (cod) => (M.discMap[cod] || {}).nome || cod;
+  // variação em relação ao período anterior
+  const delta = (a, b, fmt, ehPct) => {
+    if (a === null || b === null || (!ehPct && !b && !a)) return '';
+    const d = a - b;
+    if (Math.abs(d) < 1e-9) return '<div class="small muted">= anterior</div>';
+    return `<div class="small ${d > 0 ? 'st-ok' : 'st-bad'}">${d > 0 ? '▲' : '▼'} ${fmt(Math.abs(d))} vs anterior</div>`;
+  };
+  const pp = (v) => `${(v * 100).toFixed(0)} p.p.`;
+  const kpi = (rot, val, dl) => `<div class="kpi"><div class="l">${rot}</div><div class="v">${val}</div>${dl}</div>`;
+  const semana = ['dom', 'seg', 'ter', 'qua', 'qui', 'sex', 'sáb'];
+  const dow = (s) => semana[new Date(toUTC(s)).getUTCDay()];
+  const rotBloco = (f) => `${f.dia}${cfg.tipoDe(f.dia) === 'REVISÃO' ? 'R' : ''}${cfg.grupoDe(f.dia)}`;
+
+  // por data (mais recente primeiro)
+  const porData = {};
+  A.rs.forEach((r) => { (porData[r.data] = porData[r.data] || []).push(r); });
+  const linhasData = Object.keys(porData).sort().reverse().map((d) => {
+    const rs = porData[d];
+    const q = rs.reduce((s, r) => s + r.q, 0), ac = rs.reduce((s, r) => s + r.ac, 0);
+    const cods = [...new Set(rs.map((r) => r.cod))];
+    const blocos = cfg.fechados.filter((f) => f.data === d);
+    return `<tr><td>${br(d)} <span class="small muted">${dow(d)}</span></td>
+      <td class="small">${cods.map((c) => `<span class="chip" title="${esc(nome(c))}">${esc(c)}</span>`).join(' ')}</td>
+      <td class="num">${cods.length}</td><td class="num">${rs.length}</td><td class="num">${fmt1(rs.reduce((s, r) => s + r.min, 0) / 60)}</td>
+      <td class="num">${rs.reduce((s, r) => s + r.paginas, 0) || ''}</td><td class="num">${q || ''}</td><td class="num">${q ? pct(ac / q) : ''}</td>
+      <td class="small">${blocos.map((f) => `<span class="chip" title="Semana ${f.semana}, dia ${f.dia} do ciclo">${rotBloco(f)}</span>`).join(' ')}</td></tr>`;
+  }).join('');
+
+  // por disciplina no período
+  const porDisc = {};
+  A.rs.forEach((r) => { const x = porDisc[r.cod] = porDisc[r.cod] || { min: 0, s: 0, q: 0, ac: 0, pags: 0, dias: new Set() }; x.min += r.min; x.s++; x.q += r.q; x.ac += r.ac; x.pags += r.paginas; x.dias.add(r.data); });
+  const linhasDisc = Object.entries(porDisc).sort((a, b) => b[1].min - a[1].min).map(([c, x]) => `<tr><td>${esc(nome(c))}</td><td class="num">${x.dias.size}</td><td class="num">${x.s}</td>
+    <td class="num">${fmt1(x.min / 60)}</td><td class="num">${x.pags || ''}</td><td class="num">${x.q || ''}</td><td class="num">${x.q ? pct(x.ac / x.q) : ''}</td></tr>`).join('');
+
+  return `
+    <h2>Histórico por data</h2>
+    <div class="card">
+      <p class="small muted" style="margin-top:0">Monitoramento do que você estudou em cada data, separado do ciclo. Escolha o período; os números comparam com o período anterior do mesmo tamanho (${br(addDias(ini, -n))} a ${br(addDias(ini, -1))}).</p>
+      <div class="linha">
+        ${Object.entries(PERIODOS).map(([k, t]) => `<button class="btn peq ${p === k ? '' : 'sec'}" data-acao="hist-periodo" data-id="${k}">${t}</button>`).join('')}
+        <label class="small">De <input type="date" id="histIni" value="${ini}"></label>
+        <label class="small">Até <input type="date" id="histFim" value="${fim}"></label>
+      </div>
+    </div>
+    <div class="grid">
+      ${kpi('Dias com estudo', `${A.dias} de ${A.total}`, delta(A.dias, B.dias, (v) => `${v} dia(s)`))}
+      ${kpi('Horas líquidas', fmt1(A.horas), delta(A.horas, B.horas, (v) => `${fmt1(v)} h`))}
+      ${kpi('Média por dia estudado', `${fmt1(A.mediaDia)} h`, delta(A.mediaDia, B.mediaDia, (v) => `${fmt1(v)} h`))}
+      ${kpi('Disciplinas estudadas', A.discs, delta(A.discs, B.discs, (v) => v))}
+      ${kpi('Sessões registradas', A.sessoes, delta(A.sessoes, B.sessoes, (v) => v))}
+      ${kpi('Blocos do ciclo concluídos', A.blocos, delta(A.blocos, B.blocos, (v) => v))}
+      ${kpi('Páginas', A.pags, delta(A.pags, B.pags, (v) => v))}
+      ${kpi('Questões · acerto', `${A.q} · ${pct(A.acerto)}`, delta(A.acerto, B.acerto, pp, true))}
+    </div>
+    <div class="card tab-wrap"><h3>Por disciplina no período</h3><table>
+      <tr><th>Disciplina</th><th class="num">Dias</th><th class="num">Sessões</th><th class="num">Horas</th><th class="num">Páginas</th><th class="num">Questões</th><th class="num">% acerto</th></tr>
+      ${linhasDisc || '<tr><td colspan="7" class="muted">Nenhum estudo no período.</td></tr>'}
+    </table></div>
+    <div class="card tab-wrap"><h3>Dia a dia</h3><table>
+      <tr><th>Data</th><th>Disciplinas</th><th class="num">Qtde</th><th class="num">Sessões</th><th class="num">Horas</th><th class="num">Páginas</th><th class="num">Questões</th><th class="num">% acerto</th><th>Blocos fechados</th></tr>
+      ${linhasData || '<tr><td colspan="9" class="muted">Nenhum estudo no período.</td></tr>'}
+    </table><p class="small muted">Só aparecem as datas com estudo. Blocos fechados: dia do ciclo + grupo (ex.: 1A = teoria do Grupo A; 5RA = revisão do Grupo A).</p></div>`;
+}
+
 // Pausas registradas pelo cronômetro (campo obs "Pausas: n (x min)")
 function resumoPausas(diario) {
   const rs = diario.map((r) => ({ r, m: String(r.obs || '').match(/Pausas: (\d+) \((\d+) min\)/) })).filter((x) => x.m);
@@ -855,7 +976,8 @@ function ligarRegistro() {
   const f = $('#fReg'); if (!f) return;
   const sel = f.aula_id;
   const sugerida = preAula || (() => {
-    const d = M.discs.find((x) => x.grupo === M.cfg.grupo && x.seq);
+    const doBloco = M.discs.filter((x) => x.grupo === M.cfg.grupo && x.seq).slice(0, M.cfg.maxDisc);
+    const d = doBloco.find((x) => !feitoNoBloco(x.cod).length) || doBloco[0];
     const l = d ? (M.fila[d.cod] || []).filter((a) => a.incl) : [];
     return l[0] ? l[0].id : null;
   })();
@@ -919,17 +1041,14 @@ function exportarMeta() {
   const td = (v, st = '') => `<td style="border:1px solid #999;${st}">${esc(v ?? '')}</td>`;
   const th = (v) => `<th style="border:1px solid #999;background:#1f5f8b;color:#fff">${esc(v)}</th>`;
   let linhas = '';
-  // Datas desta semana do ciclo (por progresso: pode ter mais de 7 dias de calendário); sem mapa, 7 dias corridos.
-  const datas = Object.keys(cfg.slot).filter((d) => cfg.slot[d].semana === s).sort();
-  if (!datas.length) for (let k = 0; k < 7; k++) datas.push(addDias(ini, k));
-  for (const data of datas) {
-    const sl = cfg.slot[data];
-    if (sl && !sl.avancou && data < cfg.hoje && !M.diario.some((r) => r.data === data)) continue; // dia sem estudo: não ocupa o ciclo
-    const dia = sl ? sl.dia : datas.indexOf(data) + 1;
-    const tipo = dia <= cfg.dT ? 'TEORIA' : dia <= cfg.dT + cfg.dR ? 'REVISÃO' : 'DESCANSO';
-    const g = dia === 7 || dia % 2 === 1 ? 'A' : 'B';
+  // Os 7 dias (blocos) desta semana do ciclo; a data de cada linha é a do registro (um bloco pode levar
+  // mais de um dia de calendário, e um dia de calendário pode fechar mais de um bloco).
+  for (let dia = 1; dia <= 7; dia++) {
+    const tipo = cfg.tipoDe(dia);
+    const g = cfg.grupoDe(dia);
     const ord = tipo === 'TEORIA' ? g : tipo === 'REVISÃO' ? 'R' + g.toLowerCase() : 'Descanso';
-    const regs = M.diario.filter((r) => r.data === data);
+    const regs = M.diario.filter((r) => r.semana === s && r.diaCiclo === dia && cfg.posDe[cfg.chaveReg(r)]);
+    const data = dia === 7 && cfg.descansoEm && cfg.semana === s ? cfg.descansoEm : regs.length ? regs[0].data : '';
     const plan = tipo === 'DESCANSO' ? [] : M.discs.filter((d) => d.grupo === g && d.seq).slice(0, cfg.maxDisc);
     const usados = new Set();
     const linha = (rot, disc, r) => {
@@ -938,7 +1057,7 @@ function exportarMeta() {
       const assunto = !r ? (tipo === 'REVISÃO' ? `Fazer ${cfg.qRev} questões e revisar o que errar` : '')
         : a ? `${a.titulo}${r.obs ? ' — ' + r.obs : ''}` : /-REV$/.test(r.aula_id) && M.topMap[r.aula_id.slice(0, -4)]
           ? `${M.topMap[r.aula_id.slice(0, -4)].topico} — ${r.obs}` : r.obs;
-      return `<tr>${td(br(data))}${td(ord)}${td(rot)}${td(disc)}${td(cfg.minDisc)}${td(a ? a.aula : '')}${td(assunto)}
+      return `<tr>${td(br(r ? r.data : data))}${td(ord)}${td(rot)}${td(disc)}${td(cfg.minDisc)}${td(a ? a.aula : '')}${td(assunto)}
         ${td(r && r.paginas ? r.paginas : '')}${td(r && r.min ? r.min : '')}${td(r && r.q ? r.q : '')}${td(r && r.q ? r.ac : '')}${td(r && r.q ? pct(r.ac / r.q) : '')}</tr>`;
     };
     if (tipo === 'DESCANSO' && !regs.length) { linhas += `<tr>${td(br(data))}${td(ord)}${td('')}${td('Descanso')}${td('')}${td('')}${td('')}${td('')}${td('')}${td('')}${td('')}${td('')}</tr>`; continue; }
@@ -1007,6 +1126,7 @@ document.addEventListener('click', async (ev) => {
   else if (a === 'registrar-extra') { preExtra = id || ''; view = 'registrar'; LS.set('view', view); render(); }
   else if (a === 'reverso') registrarReverso(id);
   else if (a === 'exportar') exportarMeta();
+  else if (a === 'hist-periodo') { filtros.histPer = id; LS.set('filtros', filtros); render(); }
   else if (a === 'apagar-reg') { if (confirm('Apagar este registro?')) store.apagar('Diario', [id]); }
   else if (a === 'recarregar') { await store.recarregar(); render(); toast('Dados recarregados.'); }
   else if (a === 'desconectar') { if (confirm('Desconectar e voltar ao modo demonstração? Os dados continuam na planilha.')) { store.conexao = { url: '', chave: '' }; LS.set('conexao', store.conexao); LS.set('dados', null); store.dados = null; await store.iniciar(); render(); } }
@@ -1020,6 +1140,12 @@ document.addEventListener('click', async (ev) => {
 document.addEventListener('change', (ev) => {
   const el = ev.target;
   if (el.id === 'arqPacote' && el.files[0]) { importarPacote(el.files[0]); el.value = ''; return; }
+  if (el.id === 'histIni' || el.id === 'histFim') {
+    const atual = periodoHist();
+    filtros.histIni = el.id === 'histIni' ? el.value || atual.ini : atual.ini;
+    filtros.histFim = el.id === 'histFim' ? el.value || atual.fim : atual.fim;
+    filtros.histPer = 'custom'; LS.set('filtros', filtros); render(); return;
+  }
   if (el.id === 'selMat') { filtros.material = el.value; LS.set('filtros', filtros); render(); return; }
   if (el.id === 'selTopDisc') { filtros.topDisc = el.value; LS.set('filtros', filtros); render(); return; }
   if (el.id === 'selTopEd') { filtros.topEdital = el.value; LS.set('filtros', filtros); render(); return; }
