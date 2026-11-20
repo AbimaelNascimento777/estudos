@@ -674,16 +674,20 @@ function cardDisciplina(d, n, pend) {
     const q = ultHoje.q ? ` · ${ultHoje.ac}/${ultHoje.q} (${pct(ultHoje.ac / ultHoje.q)})` : '';
     acao = `✔ FEITO NESTE BLOCO${ultHoje.data < cfg.hoje ? ` (${br(ultHoje.data)})` : ''}: ${aulaHoje ? aulaHoje.aula : ultHoje.aula_id}${pags}${q}`;
   } else if (!fila.length) acao = '⚠ Curso desta disciplina ainda não mapeado (aba Material).';
-  else if (tipoDia === 'REVISÃO') acao = `► ${pend ? 'PENDENTE' : 'HOJE'}: ${cfg.qRev} questões das aulas desta semana e revise só o que errar`;
+  else if (tipoDia === 'REVISÃO') acao = `► ${pend ? 'PENDENTE' : 'HOJE'}: revisar os assuntos abaixo + ${cfg.qRev} questões, corrigindo o que errar`;
   else acao = `${pend ? '► PENDENTE: ' : tipoDia === 'DESCANSO' ? 'Próximo: ' : '► HOJE: '}${prox.aula} — ${prox.proxima}`;
-  const qcIds = tipoDia === 'REVISÃO' ? [...new Set(semana.flatMap((a) => a.qcIds))]
+  const rev = tipoDia === 'REVISÃO' ? assuntosParaRevisar(d.cod) : null;
+  const qcIds = rev ? [...new Set(rev.itens.flatMap((x) => x.a.qcIds))]
     : aulaHoje ? aulaHoje.qcIds : prox ? prox.qcIds : [];
   const alvo = aulaHoje || prox;
   const ref = alvo && tipoDia !== 'REVISÃO' ? `<div class="small muted">📚 ${esc([cursoDaAula(alvo) || alvo.fonte, alvo.aula, alvo.titulo].filter(Boolean).join(' · '))}</div>` : '';
-  const botoes = ultHoje
+  const botoes = ultHoje && rev
+    ? '<span class="small muted">Para revisar mais uma aula, use "Registrar" na linha dela.</span>'
+    : ultHoje
     ? `${botaoAula(aulaHoje)}${prox ? `<span class="small muted">Próximo estudo: ${esc(prox.aula)} — ${esc(prox.proxima)}</span>
        <button class="btn peq sec" data-acao="registrar-aula" data-id="${esc(prox.id)}">Registrar outra</button>${prox !== aulaHoje ? botaoAula(prox) : ''}` : ''}`
-    : prox ? `${tipoDia !== 'REVISÃO' ? botaoAula(prox) : ''}<button class="btn peq" data-acao="registrar-aula" data-id="${esc(prox.id)}">Registrar esta aula</button>
+    : rev ? (rev.itens[0] ? `<button class="btn peq" data-acao="registrar-revisao" data-id="${esc(rev.itens[0].a.id)}">Registrar revisão</button>` : '')
+    : prox ? `${botaoAula(prox)}<button class="btn peq" data-acao="registrar-aula" data-id="${esc(prox.id)}">Registrar esta aula</button>
        <button class="btn peq sec" data-acao="ja-estudei" data-id="${esc(prox.id)}" title="Já estudei antes: conta como batida concluída e passa para a próxima">Já estudei</button>` : '';
   return `<div class="card">
     <div class="linha entre"><h3>${pend ? `⏳ ${esc(d.nome)} <span class="small st-bad">pendente de ${br(pend.data)}</span>` : `${n}. ${esc(d.nome)}`}</h3><span class="small muted">${cfg.minDisc} min · meta ${pct(d.meta)} · cobertura ${pct(d.cobertura)}</span></div>
@@ -691,10 +695,52 @@ function cardDisciplina(d, n, pend) {
     ${ref}
     <div class="linha">${botoes}
       ${botaoQC(qcIds, tipoDia === 'REVISÃO' ? 'Caderno QC da semana' : 'Caderno QC da aula')}</div>
-    <div class="duas" style="margin-top:10px">
+    ${rev ? blocoRevisao(rev) : `<div class="duas" style="margin-top:10px">
       <div><div class="small muted">Fila de aulas (teoria)</div><table>${fila.slice(0, 4).map((a) => `<tr><td>${a.link ? `<a target="_blank" rel="noopener" href="${esc(a.link)}">${esc(a.aula)}</a>` : esc(a.aula)}</td><td>${esc(String(a.titulo).slice(0, 70))}${cursoDaAula(a) ? ` <span class="small muted">(${esc(cursoDaAula(a).replace('Gran · ', ''))})</span>` : ''}</td><td class="small ${clsStatus(a.status)}">${esc(a.status)} · faltam ${a.S} ${a.un}</td></tr>`).join('')}</table></div>
       <div><div class="small muted">Aulas desta semana (revisão)</div><table>${semana.map((a) => `<tr><td>${esc(a.aula)}</td><td>${esc(String(a.titulo).slice(0, 60))}</td><td class="num">${esc(a.pagsSemana)}</td><td class="num">${pct(a.W)}</td></tr>`).join('') || '<tr><td class="muted small">Nada ainda nesta semana.</td></tr>'}</table></div>
-    </div></div>`;
+    </div>`}</div>`;
+}
+
+// Assuntos para revisar (dias de revisão): as aulas desta disciplina estudadas nos dias de TEORIA da semana
+// atual do ciclo. Se não houve teoria dela nesta semana, mostra as últimas aulas estudadas.
+function assuntosParaRevisar(cod) {
+  const { cfg } = M;
+  const daAula = (r) => r.cod === cod && M.aulaMap[r.aula_id] && ehSessao(r);
+  let regs = M.diario.filter((r) => daAula(r) && r.semana === cfg.semana && r.diaCiclo <= cfg.dT && r.data <= cfg.hoje);
+  let semanaAtual = true;
+  if (!regs.length) {
+    semanaAtual = false;
+    const ult = [...new Set(M.diario.filter((r) => daAula(r) && r.data <= cfg.hoje && !(r.semana === cfg.semana && r.diaCiclo > cfg.dT)).map((r) => r.aula_id))].slice(-2);
+    regs = M.diario.filter((r) => daAula(r) && ult.includes(r.aula_id) && !(r.semana === cfg.semana && r.diaCiclo > cfg.dT));
+  }
+  const porAula = {};
+  regs.forEach((r) => {
+    const x = porAula[r.aula_id] = porAula[r.aula_id] || { a: M.aulaMap[r.aula_id], pis: [], pfs: [], q: 0, ac: 0, datas: new Set(), obs: [] };
+    if (r.pi !== null) x.pis.push(r.pi);
+    if (r.pf !== null) x.pfs.push(r.pf);
+    x.q += r.q; x.ac += r.ac; x.datas.add(r.data);
+    const o = String(r.obs || '').replace(/\s*\|?\s*Pausas: \d+ \(\d+ min\)/, '').trim();
+    if (o) x.obs.push(o);
+  });
+  // revisões já registradas nesta semana (dias de revisão), por aula
+  const revisadas = new Set(M.diario.filter((r) => r.cod === cod && r.semana === cfg.semana && r.diaCiclo > cfg.dT && r.diaCiclo <= cfg.dT + cfg.dR).map((r) => r.aula_id));
+  const itens = Object.values(porAula).sort((x, y) => x.a.idx - y.a.idx).map((x) => ({ ...x, revisada: revisadas.has(x.a.id) }));
+  return { itens, semanaAtual };
+}
+
+function blocoRevisao(rev) {
+  if (!rev.itens.length) return '<div class="acao" style="margin-top:10px">Nenhuma aula desta disciplina registrada ainda. Faça as questões da disciplina e registre como extra.</div>';
+  const linhas = rev.itens.map((x) => {
+    const a = x.a;
+    const trecho = x.pis.length && x.pfs.length ? `${a.un} ${Math.min(...x.pis)}–${Math.max(...x.pfs)}` : '';
+    const tops = a.topicosIds.map((t) => M.topMap[t]).filter(Boolean);
+    return `<tr><td>${x.revisada ? '✔ ' : ''}<b>${esc(a.aula)}</b><div class="small muted">${[...x.datas].sort().map(br).join(', ')}</div></td>
+      <td>${esc(a.titulo)}${tops.length ? `<div class="small muted">Edital: ${tops.map((t) => esc(t.topico)).join(' · ')}</div>` : ''}${x.obs.length ? `<div class="small">📝 ${esc(x.obs.join(' · '))}</div>` : ''}</td>
+      <td class="num small">${esc(trecho)}</td><td class="num small">${x.q ? `${x.ac}/${x.q} · ${pct(x.ac / x.q)}` : '—'}</td>
+      <td>${botaoAula(a)} <button class="btn peq sec" data-acao="registrar-revisao" data-id="${esc(a.id)}">Registrar</button></td></tr>`;
+  }).join('');
+  return `<div style="margin-top:10px"><div class="small muted">${rev.semanaAtual ? 'O que revisar — assuntos estudados nos dias de teoria desta semana' : 'Nada desta disciplina na teoria desta semana — revise as últimas aulas estudadas'}</div>
+    <div class="tab-wrap"><table><tr><th>Aula</th><th>Assunto</th><th class="num">Trecho visto</th><th class="num">Questões</th><th></th></tr>${linhas}</table></div></div>`;
 }
 
 function graficoSemanas(semanas, meta) {
@@ -958,6 +1004,7 @@ setInterval(() => cron.pintar(), 1000);
 
 let preAula = null;
 let preExtra = null;
+let preRevisao = false;
 function ligarRegistro() {
   cron.pintar();
   const fx = $('#fExtra');
@@ -993,6 +1040,13 @@ function ligarRegistro() {
     f.pag_fim.value = Math.min(a.H, a.R + a.sess - 1);
   };
   sel.addEventListener('change', info); info();
+  if (preRevisao || M.cfg.tipoDia === 'REVISÃO') {
+    // Revisão: não avança páginas da aula (campos de página vazios); conta questões e tempo.
+    const limpar = () => { f.pag_ini.value = ''; f.pag_fim.value = ''; if (!f.obs.value) f.obs.value = 'Revisão'; };
+    limpar(); sel.addEventListener('change', limpar);
+    $('#regInfo').textContent = 'Revisão: deixe as páginas em branco (não avança a aula). Informe minutos, questões e acertos.';
+  }
+  preRevisao = false;
   f.addEventListener('submit', (ev) => {
     ev.preventDefault();
     const v = Object.fromEntries(new FormData(f).entries());
@@ -1122,6 +1176,7 @@ document.addEventListener('click', async (ev) => {
     }
   }
   else if (a === 'registrar-aula') { preAula = id; view = 'registrar'; LS.set('view', view); render(); }
+  else if (a === 'registrar-revisao') { preAula = id; preRevisao = true; view = 'registrar'; LS.set('view', view); render(); }
   else if (a === 'ja-estudei') marcarEstudada(id);
   else if (a === 'registrar-extra') { preExtra = id || ''; view = 'registrar'; LS.set('view', view); render(); }
   else if (a === 'reverso') registrarReverso(id);
